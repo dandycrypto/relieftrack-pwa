@@ -121,6 +121,7 @@ import { QrScanner, type QrScanResult } from "@/components/QrScanner"
 import { BulkQueue } from "@/components/BulkQueue"
 import TaxAssistant from "@/components/TaxAssistant"
 import { parseEWalletCSV, type EWalletProvider, type ParsedTransaction } from "@/lib/ewallet-parser"
+import StatementImport from "@/components/StatementImport"
 import type { DbRecord } from "@/lib/supabase"
 import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, calculateTax, calculateNetTaxBalance, type Record as ReliefRecord } from "@/store"
 import { createSupabaseBrowserClient } from "@/utils/supabase/client"
@@ -586,6 +587,54 @@ useEffect(() => {
     }
   }, [isHydrated])
 
+  // ── PWA Share Target pickup ───────────────────────────────────────────────
+  // When another app shares a file/image to ReliefTrack, the share-target route
+  // sets a short-lived cookie. On dashboard mount, we read it and open the add drawer.
+  useEffect(() => {
+    if (!isHydrated) return
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('shared') !== '1') return
+    // Clean URL
+    const url = new URL(window.location.href)
+    url.searchParams.delete('shared')
+    window.history.replaceState({}, '', url.pathname + url.search)
+    // Read shared file from cookie
+    const getCookie = (name: string) => {
+      const match = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`))
+      return match ? decodeURIComponent(match[1]) : null
+    }
+    const metaRaw = getCookie('shared_file_meta')
+    const dataRaw = getCookie('shared_file_data')
+    // Clear cookies
+    document.cookie = 'shared_file_meta=; max-age=0; path=/'
+    document.cookie = 'shared_file_data=; max-age=0; path=/'
+    if (metaRaw && dataRaw) {
+      try {
+        const meta = JSON.parse(metaRaw)
+        const byteStr = atob(dataRaw)
+        const bytes = new Uint8Array(byteStr.length)
+        for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i)
+        const blob = new Blob([bytes], { type: meta.type })
+        const file = new File([blob], meta.name, { type: meta.type })
+        // If it's a CSV, open statement import
+        if (meta.type.includes('csv') || meta.name.endsWith('.csv')) {
+          setIsAddModalOpen(true)
+          setShowStatementImport(true)
+          toast.info('CSV file received — select your bank and import')
+        } else {
+          // It's an image/PDF — trigger OCR
+          setIsAddModalOpen(true)
+          setTimeout(() => {
+            setBulkFiles([file])
+            setShowBulkQueue(true)
+          }, 300)
+        }
+      } catch {
+        toast.error('Could not process shared file')
+      }
+    }
+  }, [isHydrated])
+
   // ── Drive sync state (folder IDs needed for write operations) ──
   const [isAddModalOpen, setIsAddModalOpen] = useState(false)
   const [driveFolderIds, setDriveFolderIds] = useState<{
@@ -925,6 +974,7 @@ useEffect(() => {
   const bulkInputRef = useRef<HTMLInputElement>(null)
 
   // ── e-Wallet Import state ─────────────────────────────────────────────────
+  const [showStatementImport, setShowStatementImport] = useState(false)
   const [showEWalletImport, setShowEWalletImport] = useState(false)
   const [ewalletProvider, setEwalletProvider] = useState<EWalletProvider>('tng')
   const [ewalletRows, setEwalletRows] = useState<ParsedTransaction[]>([])
@@ -1435,6 +1485,7 @@ useEffect(() => {
     setShowEWalletImport(false)
     setEwalletRows([])
     setEwalletSelected(new Set())
+    setShowStatementImport(false)
   }
 
   // ── Export Handlers ────────────────────────────────────────────────────
@@ -3683,6 +3734,36 @@ useEffect(() => {
             />
           )}
 
+          {/* ── Bank Statement Import ── */}
+          {showStatementImport && !showBulkQueue && !showEWalletImport && (
+            <StatementImport
+              onClose={() => setShowStatementImport(false)}
+              onImport={(items) => {
+                let count = 0
+                items.forEach((item) => {
+                  addRecord({
+                    category: item.category,
+                    date: item.date,
+                    amount: item.amount,
+                    merchant: item.merchant,
+                    description: item.description || 'Bank statement import',
+                    status: 'pending',
+                    notes: 'Imported from bank statement',
+                  })
+                  learnMerchant(item.merchant, item.category)
+                  count++
+                })
+                addNotification({
+                  type: 'email_receipt',
+                  title: `${count} statement records imported`,
+                  body: `${count} transactions imported. Review and verify each one.`,
+                  actionTab: 'records',
+                })
+                setIsAddModalOpen(false)
+              }}
+            />
+          )}
+
           {/* ── e-Wallet Import ── */}
           {showEWalletImport && !showBulkQueue && (
             <div className="space-y-4 p-4">
@@ -3831,7 +3912,7 @@ useEffect(() => {
           )}
 
           {/* ── Upload Options ── */}
-          {!isProcessing && !showOcrReview && !showOCRForm && !isVerifying && !showQrScanner && !showBulkQueue && !showEWalletImport ? (
+          {!isProcessing && !showOcrReview && !showOCRForm && !isVerifying && !showQrScanner && !showBulkQueue && !showEWalletImport && !showStatementImport ? (
             // Upload options
             <div className="space-y-4 p-4">
               <Button
@@ -3887,6 +3968,20 @@ useEffect(() => {
                   <span className="text-sm">Import e-Wallet CSV</span>
                 </div>
                 <span className="text-xs text-muted-foreground">TnG · GrabPay · Boost</span>
+              </Button>
+              <Button
+                variant="outline"
+                className="h-16 w-full flex-col gap-1"
+                onClick={() => setShowStatementImport(true)}
+              >
+                <div className="flex items-center gap-2">
+                  <svg className="h-5 w-5 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="2" y="5" width="20" height="14" rx="2" />
+                    <path d="M2 10h20M6 15h4M6 13h2" />
+                  </svg>
+                  <span className="text-sm">Import Bank Statement</span>
+                </div>
+                <span className="text-xs text-muted-foreground">Maybank · CIMB · Public Bank · RHB · HLB · AmBank</span>
               </Button>
               <div className="relative">
                 <div className="absolute inset-0 flex items-center">
