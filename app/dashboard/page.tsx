@@ -108,6 +108,7 @@ import {
 } from "@/components/ui/drawer"
 import { cn } from "@/lib/utils"
 import { OnboardingWizard } from "@/components/OnboardingWizard"
+import { QrScanner, type QrScanResult } from "@/components/QrScanner"
 import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, calculateTax, calculateNetTaxBalance, type Record as ReliefRecord } from "@/store"
 import { createSupabaseBrowserClient } from "@/utils/supabase/client"
 import { performOCR, type OcrResult } from "@/lib/ocr"
@@ -734,6 +735,7 @@ useEffect(() => {
       fetchDriveStorage()
     }
   }, [activeTab, settings.googleDriveConnected, fetchDriveStorage])
+  const [showQrScanner, setShowQrScanner] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [ocrProgress, setOcrProgress] = useState(0)
   const [showOCRForm, setShowOCRForm] = useState(false)
@@ -1216,6 +1218,8 @@ useEffect(() => {
     setOcrResult(null)
     setVerifyResult(null)
     setIsVerifying(false)
+    setShowOcrReview(false)
+    setShowQrScanner(false)
     setReceiptPreview(null)
     setUploadedFileName("")
     setFormErrors({})
@@ -3077,8 +3081,29 @@ useEffect(() => {
             </div>
           )}
 
-          {/* ── Upload Options (original) ── */}
-          {!isProcessing && !showOcrReview && !showOCRForm && !isVerifying ? (
+          {/* ── QR Scanner overlay ── */}
+          {showQrScanner && (
+            <QrScanner
+              onCancel={() => setShowQrScanner(false)}
+              onResult={(result: QrScanResult) => {
+                setShowQrScanner(false)
+                setReviewData({
+                  vendor: result.vendor || '',
+                  amount: result.amount ? String(result.amount) : '',
+                  date: result.date || `${settings.defaultTaxYear}-${new Date().toISOString().slice(5, 10)}`,
+                  description: '',
+                  invoiceNumber: result.invoiceNumber || '',
+                  confidence: result.uuid ? 100 : 50,
+                  rawText: result.rawUrl,
+                  category: 'lifestyle',
+                })
+                setShowOcrReview(true)
+              }}
+            />
+          )}
+
+          {/* ── Upload Options ── */}
+          {!isProcessing && !showOcrReview && !showOCRForm && !isVerifying && !showQrScanner ? (
             // Upload options
             <div className="space-y-4 p-4">
               <Button
@@ -3096,6 +3121,19 @@ useEffect(() => {
               >
                 <Upload className="h-8 w-8 text-primary" />
                 <span>Upload Image or PDF</span>
+              </Button>
+              <Button
+                variant="outline"
+                className="h-24 w-full flex-col gap-2"
+                onClick={() => setShowQrScanner(true)}
+              >
+                <svg className="h-8 w-8 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="3" y="3" width="7" height="7" rx="1" />
+                  <rect x="14" y="3" width="7" height="7" rx="1" />
+                  <rect x="3" y="14" width="7" height="7" rx="1" />
+                  <path d="M14 14h2v2h-2zM18 14h3M14 18h3M18 18v3M21 18v.01" />
+                </svg>
+                <span>Scan e-Invoice QR</span>
               </Button>
               <div className="relative">
                 <div className="absolute inset-0 flex items-center">
