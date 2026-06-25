@@ -129,6 +129,7 @@ import { performOCR, type OcrResult } from "@/lib/ocr"
 import { verifyRecord, verifyEAForm, findDuplicates, type VerifyResult, type EAFormVerifyResult } from "@/lib/verify"
 import { exportRecordsCSV, exportRecordsPDF, exportLHDNReference } from "@/lib/export"
 import { computeMaximiser } from "@/lib/relief-maximiser"
+import { runScenarios, getQuickScenarios } from "@/lib/scenario-planner"
 import { generateTaxReport } from "@/lib/tax-report"
 import {
   PieChart as RechartsPieChart,
@@ -2021,6 +2022,60 @@ useEffect(() => {
             )
           })()}
 
+          {/* What-If Scenario Planner */}
+          {(() => {
+            const ea = settings.eaFormByYear?.[selectedYear]
+            const gross = ea?.grossIncome ?? displayProfile.grossIncome ?? 0
+            if (gross <= 0) return null
+            const quickInputs = getQuickScenarios(reliefTotals, selectedYear, displayProfile)
+            if (quickInputs.length === 0) return null
+            const ciNow = Math.max(0,
+              gross
+              - Math.min(ea?.epf ?? 0, 4000)
+              - 9000
+              - (Object.values(reliefTotals) as number[]).reduce((s: number, v: number) => s + v, 0)
+            )
+            const { scenarios } = runScenarios(ciNow, calculateTax(ciNow).taxAfterRebate, reliefTotals, quickInputs, selectedYear, displayProfile)
+            if (scenarios.length === 0) return null
+            return (
+              <div className="space-y-2">
+                <div className="flex items-center gap-1.5">
+                  <BrainCircuit className="h-4 w-4 text-violet-500" />
+                  <h2 className="font-semibold text-foreground">What-If Scenarios</h2>
+                </div>
+                <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+                  {scenarios.map((s) => (
+                    <div
+                      key={s.categoryId}
+                      className="flex shrink-0 flex-col items-start gap-1.5 rounded-xl border border-violet-200 bg-violet-50 dark:border-violet-900 dark:bg-violet-950/20 px-3 py-2.5 w-[165px]"
+                    >
+                      <span className="text-[10px] font-semibold text-violet-600 dark:text-violet-400">+RM {s.cappedAddition.toLocaleString()}</span>
+                      <span className="text-sm font-medium text-foreground leading-tight line-clamp-2">{s.label}</span>
+                      <div>
+                        <p className="text-xs text-muted-foreground">ROI: {s.roiPercent.toFixed(0)}¢ tax / RM spent</p>
+                        {s.taxSaved > 0 && (
+                          <p className="text-xs font-bold text-violet-600 dark:text-violet-400">
+                            Save RM {s.taxSaved.toLocaleString()}
+                          </p>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => {
+                          setNewRecord((prev) => ({ ...prev, category: s.categoryId }))
+                          setIsAddModalOpen(true)
+                        }}
+                        className="flex items-center gap-1 text-xs text-violet-600 dark:text-violet-400 hover:underline mt-0.5"
+                      >
+                        <Plus className="h-3 w-3" />
+                        Add Record
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
+          })()}
+
           {/* Year Comparison Toggle */}
           <div className="flex items-center justify-between">
             <h2 className="font-semibold text-foreground">Overview</h2>
@@ -3861,7 +3916,10 @@ useEffect(() => {
               onClose={() => setShowStatementImport(false)}
               onImport={(items) => {
                 let count = 0
+                let skipped = 0
                 items.forEach((item) => {
+                  const dupes = findDuplicates({ merchant: item.merchant, amount: item.amount, date: item.date }, displayRecords)
+                  if (dupes.length > 0) { skipped++; return }
                   addRecord({
                     category: item.category,
                     date: item.date,
@@ -3877,7 +3935,7 @@ useEffect(() => {
                 addNotification({
                   type: 'email_receipt',
                   title: `${count} statement records imported`,
-                  body: `${count} transactions imported. Review and verify each one.`,
+                  body: `${count} transactions imported${skipped > 0 ? `, ${skipped} duplicates skipped` : ''}. Review and verify each one.`,
                   actionTab: 'records',
                 })
                 setIsAddModalOpen(false)
@@ -3895,19 +3953,27 @@ useEffect(() => {
                 </button>
               </div>
               {/* Provider selector */}
-              <div className="flex gap-2">
-                {(['tng', 'grab', 'boost'] as EWalletProvider[]).map((p) => (
+              <div className="grid grid-cols-4 gap-1.5">
+                {([
+                  { id: 'tng',       label: 'TnG' },
+                  { id: 'grab',      label: 'GrabPay' },
+                  { id: 'boost',     label: 'Boost' },
+                  { id: 'shopeepay', label: 'ShopeePay' },
+                  { id: 'mae',       label: 'MAE' },
+                  { id: 'bigpay',    label: 'BigPay' },
+                  { id: 'setel',     label: 'Setel' },
+                ] as { id: EWalletProvider; label: string }[]).map(({ id, label }) => (
                   <button
-                    key={p}
-                    onClick={() => setEwalletProvider(p)}
+                    key={id}
+                    onClick={() => setEwalletProvider(id)}
                     className={cn(
-                      "flex-1 rounded-lg border py-2 text-sm font-medium transition-all",
-                      ewalletProvider === p
+                      "rounded-lg border py-1.5 text-xs font-medium transition-all",
+                      ewalletProvider === id
                         ? "border-emerald-500 bg-emerald-50 text-emerald-700 dark:border-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-300"
                         : "border-border text-muted-foreground hover:border-emerald-300"
                     )}
                   >
-                    {p === 'tng' ? "TnG eWallet" : p === 'grab' ? "GrabPay" : "Boost"}
+                    {label}
                   </button>
                 ))}
               </div>
@@ -3982,9 +4048,12 @@ useEffect(() => {
                     disabled={ewalletSelected.size === 0}
                     onClick={() => {
                       let count = 0
+                      let skipped = 0
                       ewalletSelected.forEach((i) => {
                         const row = ewalletRows[i]
                         const cat = ewalletEditCategories[i] || row.category
+                        const dupes = findDuplicates({ merchant: row.merchant, amount: row.amount, date: row.date }, displayRecords)
+                        if (dupes.length > 0) { skipped++; return }
                         const id = addRecord({
                           category: cat,
                           date: row.date,
@@ -3999,7 +4068,7 @@ useEffect(() => {
                         })
                         count++
                       })
-                      toast.success(`${count} records imported`)
+                      toast.success(`${count} records imported${skipped > 0 ? ` · ${skipped} duplicates skipped` : ''}`)
                       setShowEWalletImport(false)
                       setEwalletRows([])
                       setEwalletSelected(new Set())
@@ -4088,7 +4157,7 @@ useEffect(() => {
                   </svg>
                   <span className="text-sm">Import e-Wallet CSV</span>
                 </div>
-                <span className="text-xs text-muted-foreground">TnG · GrabPay · Boost</span>
+                <span className="text-xs text-muted-foreground">TnG · GrabPay · Boost · ShopeePay · MAE · BigPay · Setel</span>
               </Button>
               <Button
                 variant="outline"
