@@ -641,22 +641,22 @@ export async function POST(request: NextRequest) {
         }
 
         return NextResponse.json({
-          amount: null,
-          date: null,
-          merchant: eaFormData?.employerName ?? 'Unknown Employer',
-          description: `EA Form ${eaFormData?.taxYear ?? ''}`,
-          suggestedCategory: 'lifestyle',
-          invoiceNumber: null,
-          taxAmount: null,
-          lhdNCategory: '',
-          recipient: '',
-          rawText,
-          confidence: parsed.confidence ?? 0,
+          vendor: eaFormData?.employerName ?? 'Unknown Employer',
+          date: eaFormData ? `${eaFormData.taxYear}-12-31` : null,
           time: null,
+          amount: eaFormData?.grossIncome ?? null,
+          tax_amount: null,
+          tax_type: null,
           currency: 'MYR',
-          taxExempt: false,
-          lineItems: '',
-          notes: '',
+          category: 'lifestyle',
+          invoice_number: null,
+          tin: null,
+          sst_registration_no: null,
+          raw_text: rawText,
+          confidence: parsed.confidence ?? 0,
+          extraction_method: 'paddleocr_rule',
+          needs_review: false,
+          document_type: 'ea_form',
           eaFormData,
         })
       }
@@ -699,40 +699,27 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // Photo OCR returns rawText + (when v2) structured fields
-      // Client (lib/ocr.ts) parses vendor/amount/date/etc. from rawText as fallback
+      // Python FastAPI returns snake_case OcrResult directly.
+      // v1 fallback: derive what we can from rawText.
+      const derivedCategory = usedV2 ? (parsed.category ?? null) : suggestCategory(rawText)
       return NextResponse.json({
-        // v2 structured fields (when usedV2)
-        vendor: usedV2 ? (parsed.vendor ?? null) : null,
-        date: usedV2 ? (parsed.date ?? null) : null,
-        time: usedV2 ? (parsed.time ?? null) : null,
-        amount: usedV2 ? (parsed.amount ?? null) : null,
-        tax_amount: usedV2 ? (parsed.tax_amount ?? null) : null,
+        vendor: usedV2 ? (parsed.vendor ?? null) : extractVendor(rawText),
+        date: usedV2 ? (parsed.date ?? null) : parseDate(rawText).date,
+        time: usedV2 ? (parsed.time ?? null) : parseDate(rawText).time,
+        amount: usedV2 ? (parsed.amount ?? null) : extractAmount(rawText),
+        tax_amount: usedV2 ? (parsed.tax_amount ?? null) : extractTaxAmount(rawText),
         tax_type: usedV2 ? (parsed.tax_type ?? null) : null,
-        currency: usedV2 ? (parsed.currency ?? 'MYR') : 'MYR',
-        category: usedV2 ? (parsed.category ?? null) : null,
-        invoice_number: usedV2 ? (parsed.invoice_number ?? null) : null,
+        currency: usedV2 ? (parsed.currency ?? 'MYR') : detectCurrency(rawText),
+        category: derivedCategory,
+        invoice_number: usedV2 ? (parsed.invoice_number ?? null) : extractInvoiceNumber(rawText),
         tin: usedV2 ? (parsed.tin ?? null) : null,
         sst_registration_no: usedV2 ? (parsed.sst_registration_no ?? null) : null,
-        document_type: usedV2 ? (parsed.document_type ?? null) : null,
-        extraction_method: usedV2 ? (parsed.extraction_method ?? null) : null,
-        needs_review: usedV2 ? Boolean(parsed.needs_review) : false,
-        confidence_band: usedV2 ? (parsed.confidence_band ?? null) : null,
-        // Legacy aliases (dashboard reads these)
-        merchant: usedV2 ? (parsed.vendor ?? 'Unknown Merchant') : 'Unknown Merchant',
-        invoiceNumber: usedV2 ? (parsed.invoice_number ?? null) : null,
-        taxAmount: usedV2 ? (parsed.tax_amount ?? null) : null,
-        suggestedCategory: usedV2 ? (parsed.category ?? 'lifestyle') : 'lifestyle',
-        description: '',
-        lhdNCategory: '',
-        recipient: '',
-        rawText,
+        raw_text: rawText,
         confidence: parsed.confidence ?? 0,
-        taxExempt: false,
-        lineItems: '',
-        notes: '',
+        extraction_method: usedV2 ? (parsed.extraction_method ?? null) : 'paddleocr_rule',
+        needs_review: usedV2 ? Boolean(parsed.needs_review) : true,
+        document_type: usedV2 ? (parsed.document_type ?? null) : 'unknown',
         eaFormData,
-        ocr_v2: usedV2,
       })
     }
 
@@ -763,22 +750,22 @@ export async function POST(request: NextRequest) {
 
     // Return minimal response for PDF (no receipt parsing — EA Form only)
     return NextResponse.json({
-      amount: null,
-      date: null,
-      merchant: eaFormData?.employerName ?? 'Unknown Employer',
-      description: `EA Form ${eaFormData?.taxYear ?? ''}`,
-      suggestedCategory: 'lifestyle',
-      invoiceNumber: null,
-      taxAmount: null,
-      lhdNCategory: '',
-      recipient: '',
-      rawText,
-      confidence: 1.0,
+      vendor: eaFormData?.employerName ?? 'Unknown Employer',
+      date: eaFormData ? `${eaFormData.taxYear}-12-31` : null,
       time: null,
+      amount: eaFormData?.grossIncome ?? null,
+      tax_amount: null,
+      tax_type: null,
       currency: 'MYR',
-      taxExempt: false,
-      lineItems: '',
-      notes: '',
+      category: 'lifestyle',
+      invoice_number: null,
+      tin: null,
+      sst_registration_no: null,
+      raw_text: rawText,
+      confidence: 1.0,
+      extraction_method: 'pdfplumber',
+      needs_review: false,
+      document_type: 'ea_form',
       eaFormData,
     })
   } catch (err) {
@@ -796,51 +783,7 @@ export async function POST(request: NextRequest) {
  * Parsing done server-side with RapidOCR (PP-OCRv4 ONNX); client gets pre-parsed JSON.
  */
 
-export interface OCRResult {
-  amount: number | null
-  date: string | null
-  merchant: string
-  description: string
-  suggestedCategory: string
-  invoiceNumber: string | null
-  taxAmount: number | null
-  rawText: string
-  confidence: number
-  // New fields from receipt-tracker
-  time: string | null          // HH:MM
-  currency: string              // default "MYR"
-  taxExempt: boolean
-  lhdNCategory: string         // e.g. "Medical-Parents", "Lifestyle-SportsEquipment", "" if none
-  recipient: string             // "self" | "spouse" | "child" | "parent" | ""
-  lineItems: string             // short description of items
-  notes: string                 // invoice ID + SST/GST + time
-}
-
-// ─── LHDN Tax Deduction Patterns (from receipt_processor.py) ────────────────
-const TAX_DEDUCTION_PATTERNS: [RegExp, string, string][] = [
-  // [regex, tax_type, recipient_hint]
-  [/parent|mother|father|mum|dad|mama|papa|opah|abah| nenek| undi/i, "Medical-Parents", "parent"],
-  [/fertility|ivf|assisted conception/i, "Medical-Fertility", "self/spouse/child"],
-  [/cancer|oncolog|kemo| dialysis |hepati|sickness|chemo/i, "Medical-SeriousDisease", "self/spouse/child"],
-  [/dental|tooth extraction|orthodonic|periodon|gigi|klinik gigi|dentist/i, "Medical-Dental", "self/spouse/child"],
-  [/autism|adhd|hyperactiv|intellectual disability|down syndrome|speech therapy|occupational therapy|early intervention|learning disability|special needs/i, "Medical-ChildDisability", "child"],
-  [/health screening|medical checkup|health check|medical exam|blood test|x.ray|ultrasound|ct scan|mri|mammogram|pap smear|colonoscopy|gastroscopy|vaccination|vaksin|vaccine|immunisation|klinik 1 malaysia|kk1m|covid.test|swab test|antigen|mental health/i, "Medical-GeneralCheckup", "self/spouse/child"],
-  [/hospital|clinic|medical centre|private hospital|healthcare|specialist|surgery|operation|ward|consultation|panel clinic|klinik/i, "Medical-SelfSpouseChild", "self/spouse/child"],
-  [/unifi|maxis|fiber|streamyx|broadband|internet|celcom|digi|yes 4g|tm net|webmail|internet bill/i, "Lifestyle-BroadbandInternet", "self/spouse/child"],
-  [/yonex|victor|lining|mizuno|asics|badminton|racket|shuttlecock|grip|tape|sports equipment|sport equipment|gym gear|fitness equipment|cycling|sport shoe|running shoe|sports direct|puma|nike|adidas|new balance|under armour|maju holdings/i, "Lifestyle-SportsEquipment", "self/spouse/child"],
-  [/gym membership|fitness membership|celebrity fitness|gold.s gym|anytime fitness|fit zone|gym fee|crossfit|bootcamp|yoga studio|pilates studio|zumba|muay thai|boxing gym|martial arts/i, "Sports-GymMembership", "self/spouse/child"],
-  [/badminton court|tennis court|futsal|minisoccer|basketball court|swimming|pool entry|ice skating|climbing wall|sports facility|entry fee|court rental|booking fee|game session|league fee/i, "Sports-FacilityRental", "self/spouse/child"],
-  [/marathon|triathlon|cycling event| race |sponsorship|license fee|official fee|competition reg|registration fee|tournament/i, "Sports-CompetitionFee", "self/spouse/child"],
-  [/book|jurnal|magazine|newspaper|ebook|ereader|kindle|personal computer|laptop|macbook|iphone|samsung|pixel|oppo|vivo|oneplus|huawei|xiaomi|realme|nokia|tablet|ipad|surface|galaxy tab/i, "Lifestyle-BooksPCPhone", "self/spouse/child"],
-  [/udemy|coursera|edx|skillshare|udacity|linkedin learning|professional cert|training|workshop|masterclass|tuition|exam fee|online learning/i, "Lifestyle-SkillsEnhancement", "self"],
-  [/insurance premium|medical insurance|life insurance|takaful|prudential|aia|great eastern|axa|tune protect|etiqa|insurance co|insurance policy|family takaful|medical card|hospitalisation/i, "Education-MedicalInsurance", "self/spouse/child"],
-  [/childcare|kindergarten|nursery|playgroup|daycare|preschool|early education|tadika|taska/i, "ChildCare", "child"],
-  [/breast pump|breastfeeding|nipple shield|lactation|breast pad|feeding bottle|milk storage bag|nursing bra/i, "BreastfeedingEquipment", "self"],
-  [/ev charging|electric vehicle charger|tesla supercharger|charging station|food waste composter|composting machine/i, "EV-Charging", "self"],
-  [/housing loan|home loan|mortgage|loan interest|property loan|principal housing/i, "HousingLoanInterest", "self"],
-]
-
-// ─── Category Keywords (from receipt_processor.py) ──────────────────────────
+// CATEGORY_KEYWORDS is used by suggestCategory (v1 fallback path)
 const CATEGORY_KEYWORDS: Record<string, string[]> = {
   "Food":          ["mamak","restaurant","cafe","coffee","kopitiam","nasi","laksa","satay","food","meal","lunch","dinner","breakfast","burger","pizza","sushi","mcdonald","kfc","starbucks","tealive","chedds","pasta","western","ayam","sirap","teh","roti","noodle","kueh","dessert"],
   "Transport":     ["petrol","parking","toll","lrt","mrt","bus","taxi","grab","car","motor","fuel","shell","petronas","caltex","ezca","touch n go","ticaet","single journey","simpang","heart centre","jalan","highway","mesra","plus","gamuda","mexp","bekal","kuching"],
@@ -850,25 +793,6 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
   "Shopping":      ["shop","store","mall","parkson","sunway","midvalley","ikea","courts","harvey norman","guardian","watsons","a eon","yonex","victor","lining","mizuno","asics","badminton","tennis","grip","racket","sports","equipment","cycling","fitness","maju holdings","sports direct"],
   "Medical":       ["pharmacy","clinic","hospital","doctor","medical","guardian","watsons","ccm","dental","cancer","dialysis","fertility","ivf","vaccination","health screening"],
   "Insurance":     ["insurance","takaful","protect","coverage","prudent","aia","great eastern"],
-}
-
-// ─── Tax Deduction Detection ─────────────────────────────────────────────────
-
-function detectTaxDeduction(text: string, data: { category: string }, inferredRecipient?: string): { lhdNCategory: string, recipient: string } {
-  // Transport/toll items are never tax-deductible
-  if (data.category === "Transport") {
-    return { lhdNCategory: "", recipient: "" }
-  }
-  for (const [pattern, taxType, recipientHint] of TAX_DEDUCTION_PATTERNS) {
-    if (pattern.test(text)) {
-      // If actual inferred recipient != self, use it instead of pattern hint
-      const recipient = (inferredRecipient && inferredRecipient !== "" && inferredRecipient !== "self")
-        ? inferredRecipient
-        : recipientHint
-      return { lhdNCategory: taxType, recipient }
-    }
-  }
-  return { lhdNCategory: "", recipient: "" }
 }
 
 // ─── Date Parsing (Tesseract-aware) ─────────────────────────────────────────
@@ -1406,111 +1330,6 @@ function extractTaxAmount(text: string): number | null {
   return null
 }
 
-// ─── Supabase Profile Types ───────────────────────────────────────────────────
 
-interface UserProfile {
-  name: string | null
-  parent_names: string | null
-  spouse_name: string | null
-  child_names: string | null
-}
 
-// ─── Fetch User Profile ─────────────────────────────────────────────────────
 
-async function fetchUserProfile(supabase: import('@supabase/supabase-js').SupabaseClient): Promise<UserProfile | null> {
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return null
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('name, parent_names, spouse_name, child_names')
-    .eq('id', user.id)
-    .single()
-  return profile as UserProfile | null
-}
-
-// ─── Infer Recipient ─────────────────────────────────────────────────────────
-
-function inferRecipient(ocrText: string, profile: UserProfile | null): string {
-  // Extract patient/recipient name from OCR text
-  let patientName: string | null = null
-  const patientMatch = ocrText.match(/PATIENT:\s*(\w+\s+\w+)/i)
-  if (patientMatch) {
-    patientName = patientMatch[1].trim()
-  } else {
-    const customerMatch = ocrText.match(/CustomerName:\s*(\w+\s+\w+)/i)
-    if (customerMatch) patientName = customerMatch[1].trim()
-  }
-
-  if (!patientName || !profile) return ''
-
-  // Normalize for comparison
-  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim()
-  const patientNorm = norm(patientName)
-
-  // Build comparison list
-  const parentNames = profile.parent_names ? profile.parent_names.split(',').map(n => norm(n)) : []
-  const spouseName = profile.spouse_name ? norm(profile.spouse_name) : ''
-  const childNames = profile.child_names ? profile.child_names.split(',').map(n => norm(n)) : []
-  const userName = profile.name ? norm(profile.name) : ''
-
-  if (parentNames.some(n => n && patientNorm.includes(n) || patientNorm.includes(n))) return 'parent'
-  if (spouseName && (patientNorm.includes(spouseName) || spouseName.includes(patientNorm))) return 'spouse'
-  if (childNames.some(n => n && (patientNorm.includes(n) || patientNorm.includes(n)))) return 'child'
-  if (userName && (patientNorm.includes(userName) || userName.includes(patientNorm))) return 'self'
-
-  return ''
-}
-
-// ─── Main OCR Function ───────────────────────────────────────────────────────
-
-export async function performOCR(
-  file: File,
-  onProgress?: (pct: number) => void
-): Promise<OCRResult> {
-  if (onProgress) onProgress(10)
-
-  const formData = new FormData()
-  formData.append('file', file)
-
-  if (onProgress) onProgress(30)
-
-  const response = await fetch('/api/ocr', {
-    method: 'POST',
-    body: formData,
-  })
-
-  if (onProgress) onProgress(80)
-
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Upload failed' }))
-    throw new Error(error.error || 'OCR request failed')
-  }
-
-  const result: OCRResult = await response.json()
-
-  // ── Recipient inference (PART 2) ──────────────────────────────────────────
-  // Only infer for medical/childcare categories
-  if (
-    result.suggestedCategory.startsWith('medical_') ||
-    result.suggestedCategory === 'ChildCare'
-  ) {
-    // Dynamically import supabase to avoid top-level import issues
-    const { supabase } = await import('@/lib/supabase')
-    const profile = await fetchUserProfile(supabase)
-    const inferredRecipient = profile ? inferRecipient(result.rawText, profile) : ''
-    if (inferredRecipient) {
-      result.recipient = inferredRecipient
-      // Re-run tax deduction with actual recipient to get correct category
-      const { lhdNCategory } = detectTaxDeduction(
-        result.rawText,
-        { category: result.suggestedCategory },
-        inferredRecipient
-      )
-      if (lhdNCategory) result.lhdNCategory = lhdNCategory
-    }
-  }
-
-  if (onProgress) onProgress(100)
-
-  return result
-}

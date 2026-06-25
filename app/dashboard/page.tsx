@@ -106,10 +106,11 @@ import {
   DrawerClose,
   DrawerFooter,
 } from "@/components/ui/drawer"
+import { OcrConfidenceBadge } from '@/components/OcrConfidenceBadge'
 import { cn } from "@/lib/utils"
 import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, calculateTax, calculateNetTaxBalance, type Record as ReliefRecord } from "@/store"
 import { createSupabaseBrowserClient } from "@/utils/supabase/client"
-import { performOCR, type OCRResult } from "@/lib/ocr"
+import { performOCR, type OcrResult } from "@/lib/ocr"
 import { verifyRecord, verifyEAForm, type VerifyResult, type EAFormVerifyResult } from "@/lib/verify"
 import { exportRecordsCSV, exportRecordsPDF } from "@/lib/export"
 import {
@@ -261,7 +262,7 @@ function EditRecordModal({
     try {
       const rawText = `${form.merchant} ${form.description || ''} receipt purchase ${form.merchant} ${form.category}`.toLowerCase()
       const verification = await verifyRecord(
-        { merchant: form.merchant, description: form.description || '', amount: parseFloat(form.amount) || 0, date: form.date, rawText },
+        { vendor: form.merchant, amount: parseFloat(form.amount) || 0, date: form.date, raw_text: rawText, tax_type: null, currency: 'MYR', invoice_number: null, tin: null, sst_registration_no: null, extraction_method: null, needs_review: false, document_type: 'unknown' as const, category: null, time: null, tax_amount: null } as OcrResult,
         form.category,
         parseFloat(form.amount) || 0
       )
@@ -739,16 +740,16 @@ useEffect(() => {
   const [showOCRForm, setShowOCRForm] = useState(false)
   const [showOcrReview, setShowOcrReview] = useState(false)
   const [reviewData, setReviewData] = useState<{
-    merchant: string
+    vendor: string
     amount: string
     date: string
     description: string
     invoiceNumber: string
     confidence: number
     rawText: string
-    suggestedCategory: string
+    category: string
   } | null>(null)
-  const [ocrResult, setOcrResult] = useState<OCRResult | null>(null)
+  const [ocrResult, setOcrResult] = useState<OcrResult | null>(null)
   const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null)
   const [isVerifying, setIsVerifying] = useState(false)
   const [searchQuery, setSearchQuery] = useState("")
@@ -960,14 +961,14 @@ useEffect(() => {
       setVerifyResult(null)
       // Show review dialog — user confirms extracted data before form
       setReviewData({
-        merchant: result.merchant || '',
+        vendor: result.vendor || '',
         amount: result.amount ? String(Math.round(result.amount)) : '',
         date: result.date || new Date().toISOString().split("T")[0],
-        description: result.description || '',
-        invoiceNumber: result.invoiceNumber || '',
+        description: '',   // not in Python contract — TODO: derive from raw_text if needed
+        invoiceNumber: result.invoice_number || '',
         confidence: result.confidence,
-        rawText: result.rawText,
-        suggestedCategory: result.suggestedCategory,
+        rawText: result.raw_text,
+        category: result.category || 'lifestyle',
       })
       setShowOcrReview(true)
 
@@ -1148,8 +1149,9 @@ useEffect(() => {
     const reVerifyTimeout = setTimeout(() => reVerifyController.abort(), 5000)
     let recordStatus: 'verified' | 'pending' = 'verified' // default for manual entry
     try {
+      const rawText2 = `${newRecord.merchant} ${newRecord.description || ''} receipt purchase ${newRecord.merchant}`.toLowerCase()
       const reVerifyResult = await verifyRecord(
-        { merchant: newRecord.merchant, description: newRecord.description || '', amount: parseFloat(newRecord.amount) || 0, date: newRecord.date, rawText: `${newRecord.merchant} ${newRecord.description || ''} receipt purchase ${newRecord.merchant}`.toLowerCase() },
+        { vendor: newRecord.merchant, amount: parseFloat(newRecord.amount) || 0, date: newRecord.date, raw_text: rawText2, tax_type: null, currency: 'MYR', invoice_number: null, tin: null, sst_registration_no: null, extraction_method: null, needs_review: false, document_type: 'unknown' as const, category: null, time: null, tax_amount: null } as OcrResult,
         newRecord.category,
         parseFloat(newRecord.amount) || 0
       )
@@ -2987,8 +2989,8 @@ useEffect(() => {
                   <div className="space-y-1">
                     <Label className="text-xs font-medium text-blue-700 dark:text-blue-400 uppercase tracking-wide">Merchant / Shop</Label>
                     <Input
-                      value={reviewData.merchant}
-                      onChange={(e) => setReviewData({ ...reviewData, merchant: e.target.value })}
+                      value={reviewData.vendor}
+                      onChange={(e) => setReviewData({ ...reviewData, vendor: e.target.value })}
                       className="font-medium"
                       placeholder="Merchant name"
                     />
@@ -3029,11 +3031,11 @@ useEffect(() => {
                   {/* Category hint */}
                   <div className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400">
                     <Tag className="h-3 w-3" />
-                    <span>Suggested: <span className="font-medium">{reviewData.suggestedCategory}</span></span>
+                    <span>Suggested: <span className="font-medium">{reviewData.category}</span></span>
                   </div>
                   
                   {/* Mandatory field warning */}
-                  {(!reviewData.merchant.trim() || !reviewData.amount) && (
+                  {(!reviewData.vendor.trim() || !reviewData.amount) && (
                     <div className="flex items-center gap-2 text-xs text-amber-600 bg-amber-50 dark:bg-amber-950/30 rounded-lg px-3 py-2">
                       <AlertCircle className="h-4 w-4 shrink-0" />
                       <span>Merchant and amount are required — please fill in</span>
@@ -3061,22 +3063,89 @@ useEffect(() => {
                       // Apply confirmed data to newRecord form and proceed
                       setNewRecord(prev => ({
                         ...prev,
-                        merchant: reviewData.merchant,
+                        // lhdNCategory & recipient intentionally omitted — TODO: derive from raw_text or user input
+                        merchant: reviewData.vendor,
                         amount: reviewData.amount,
                         date: reviewData.date,
                         invoiceNumber: reviewData.invoiceNumber,
-                        category: reviewData.suggestedCategory,
+                        category: reviewData.category,
                       }))
                       setShowOcrReview(false)
                       setShowOCRForm(true)
                     }}
-                    disabled={!reviewData.merchant.trim() || !reviewData.amount}
+                    disabled={!reviewData.vendor.trim() || !reviewData.amount}
                   >
                     Confirm & Continue →
                   </Button>
                 </div>
               </div>
-              
+
+              {/* ── OCR Details — full extraction breakdown ── */}
+              {ocrResult && (
+                <details className="mt-3 rounded-xl border border-blue-200 dark:border-blue-800 overflow-hidden">
+                  <summary className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-blue-700 dark:text-blue-400 cursor-pointer hover:bg-blue-50 dark:hover:bg-blue-950/30 select-none">
+                    <Info className="h-3.5 w-3.5 shrink-0" />
+                    View OCR Details
+                  </summary>
+                  <div className="px-3 pb-3 pt-1 space-y-3">
+
+                    {/* Confidence + metadata row */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <OcrConfidenceBadge
+                        confidence={ocrResult.confidence}
+                        needsReview={ocrResult.needs_review}
+                      />
+                      {ocrResult.extraction_method && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300">
+                          {ocrResult.extraction_method}
+                        </span>
+                      )}
+                      {ocrResult.document_type && ocrResult.document_type !== 'unknown' && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                          {ocrResult.document_type}
+                        </span>
+                      )}
+                      {ocrResult.needs_review && (
+                        <span className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+                          <AlertTriangle className="h-3 w-3" />
+                          Needs review
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Extracted fields grid */}
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                      {[
+                        ['Vendor', ocrResult.vendor],
+                        ['Amount', ocrResult.amount != null ? `RM ${ocrResult.amount.toFixed(2)}` : null],
+                        ['Date', ocrResult.date],
+                        ['Time', ocrResult.time],
+                        ['Category', ocrResult.category],
+                        ['Invoice #', ocrResult.invoice_number],
+                        ['TIN', ocrResult.tin],
+                        ['SST Reg.', ocrResult.sst_registration_no],
+                        ['Tax Amount', ocrResult.tax_amount != null ? `RM ${ocrResult.tax_amount.toFixed(2)}` : null],
+                        ['Tax Type', ocrResult.tax_type],
+                      ].filter(([, v]) => v != null && v !== '').map(([label, value]) => (
+                        <div key={label as string} className="flex gap-2">
+                          <span className="text-muted-foreground shrink-0">{label}:</span>
+                          <span className="font-medium truncate">{value as string}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Raw text */}
+                    <div>
+                      <p className="text-xs text-muted-foreground mb-1 font-medium uppercase tracking-wide">Raw OCR Text</p>
+                      <pre className="text-xs text-muted-foreground bg-muted/50 rounded-lg p-2 overflow-x-auto max-h-48 whitespace-pre-wrap font-mono">
+                        {ocrResult.raw_text || 'N/A'}
+                      </pre>
+                    </div>
+
+                  </div>
+                </details>
+              )}
+
               {/* Raw OCR text — collapsible for debugging */}
               <details className="mt-3">
                 <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
@@ -3160,7 +3229,7 @@ useEffect(() => {
               {ocrResult && (
                 <p className="mx-4 text-sm text-muted-foreground">
                   Confidence: {Math.round(ocrResult.confidence)}% —{" "}
-                  {ocrResult.rawText.slice(0, 60)}...
+                  {ocrResult.raw_text.slice(0, 60)}...
                 </p>
               )}
             </div>

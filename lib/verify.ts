@@ -4,7 +4,7 @@
  * Falls back to rule-based verification if Ollama is slow/unavailable.
  */
 
-import type { OCRResult } from './ocr'
+import type { OcrResult } from '@/types/ocr'
 
 export interface VerifyResult {
   status: 'verified' | 'pending'
@@ -50,17 +50,18 @@ const MERCHANT_PATTERNS: [RegExp, string][] = [
 ]
 
 function ruleBasedVerify(
-  ocrResult: OCRResult,
+  ocrResult: OcrResult,
   category: string,
   amount: number
 ): VerifyResult {
-  // Check if merchant matches the suggested category
+  // vendor (was merchant); description proxy from raw_text first line
+  const desc = (ocrResult.raw_text || '').split('\n')[0] ?? ''
   const merchantMatch = MERCHANT_PATTERNS.find(([pattern]) =>
-    pattern.test(ocrResult.merchant + ' ' + ocrResult.description)
+    pattern.test((ocrResult.vendor ?? '') + ' ' + desc)
   )
 
-  const rawText = ocrResult.rawText.toLowerCase()
-  const fullText = (ocrResult.merchant + ' ' + ocrResult.description + ' ' + rawText).toLowerCase()
+  const rawTextLower = (ocrResult.raw_text || '').toLowerCase()
+  const fullText = ((ocrResult.vendor ?? '') + ' ' + desc + ' ' + rawTextLower).toLowerCase()
 
   // Amount reasonability checks
   const amountChecks: Record<string, { min: number; max: number; unit: string }> = {
@@ -141,7 +142,7 @@ function ruleBasedVerify(
 const LHDN_SYSTEM = `You are an LHDN YA 2025/2026 receipt verifier for Malaysian income tax. Return ONLY valid JSON. Categories: medical_self(max10k), education_self(7k), lifestyle(2.5k), epf_insurance(7k), housing_loan(7k), children_under18(2k/child), children_education(8k/child), parents_medical(8k), individual(9k-auto), spouse(4k), disabled(7k), disabled_equipment(6k). Verify: receipt must be Malaysian, merchant must match category, amount must be reasonable. JSON: {"valid":true/false,"reason":"brief reason max 60 chars","confidence":0.0-1.0}`
 
 export async function verifyRecord(
-  ocrResult: OCRResult,
+  ocrResult: OcrResult,
   category: string,
   amount: number
 ): Promise<VerifyResult> {
@@ -165,7 +166,8 @@ export async function verifyRecord(
       body: JSON.stringify({
         model: 'gemma4',
         system: LHDN_SYSTEM,
-        prompt: `Verify: Merchant="${ocrResult.merchant}", Amount=RM${amount}, Category=${category}, Description="${ocrResult.description}"`,
+        // description derived from raw_text first line; vendor used as merchant name
+        prompt: `Verify: Merchant="${ocrResult.vendor ?? ''}", Amount=RM${amount}, Category=${category}, Description="${(ocrResult.raw_text || '').split('\n')[0] ?? ''}"`,
         stream: false,
         options: { temperature: 0.1, num_predict: 80 },
       }),
