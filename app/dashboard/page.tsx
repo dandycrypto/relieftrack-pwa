@@ -128,6 +128,7 @@ import { createSupabaseBrowserClient } from "@/utils/supabase/client"
 import { performOCR, type OcrResult } from "@/lib/ocr"
 import { verifyRecord, verifyEAForm, findDuplicates, type VerifyResult, type EAFormVerifyResult } from "@/lib/verify"
 import { exportRecordsCSV, exportRecordsPDF, exportLHDNReference } from "@/lib/export"
+import { computeMaximiser } from "@/lib/relief-maximiser"
 import { generateTaxReport } from "@/lib/tax-report"
 import {
   PieChart as RechartsPieChart,
@@ -1949,55 +1950,55 @@ useEffect(() => {
             )
           })()}
 
-          {/* What's Missing — proactive action engine */}
+          {/* What's Missing — Relief Maximiser (ranked by marginal tax saved) */}
           {(() => {
-            const actionItems = applicableReliefs
-              .filter((cat) => cat.id !== 'individual')
-              .map((cat) => {
-                const claimed = reliefTotals[cat.id] || 0
-                const limit = cat.perItem
-                  ? cat.id === 'children_under18' ? displayProfile.childrenUnder18 * cat.maxLimit
-                  : displayProfile.childrenEducation * cat.maxLimit
-                  : cat.maxLimit
-                const pct = limit > 0 ? claimed / limit : 0
-                if (claimed === 0) return { cat, type: 'unclaimed' as const, potential: limit }
-                if (pct < 0.5) return { cat, type: 'underutilized' as const, potential: Math.round(limit - claimed) }
-                return null
-              })
-              .filter(Boolean)
-              .sort((a, b) => (b!.potential - a!.potential))
-              .slice(0, 5) as Array<{ cat: typeof applicableReliefs[0]; type: 'unclaimed' | 'underutilized'; potential: number }>
-            if (actionItems.length === 0) return null
+            const maxResult = computeMaximiser(displayProfile, settings, displayRecords, reliefTotals)
+            const topOps = maxResult.opportunities.slice(0, 5)
+            if (topOps.length === 0) return null
             return (
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-1.5">
                     <Sparkles className="h-4 w-4 text-amber-500" />
-                    <h2 className="font-semibold text-foreground">What's Missing?</h2>
+                    <h2 className="font-semibold text-foreground">Relief Maximiser</h2>
                   </div>
-                  <span className="text-xs text-muted-foreground">{actionItems.length} opportunities</span>
+                  <span className="text-xs text-muted-foreground">
+                    Save up to RM {maxResult.potentialSaving.toLocaleString()} more
+                  </span>
                 </div>
                 <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
-                  {actionItems.map(({ cat, type, potential }) => (
+                  {topOps.map((op) => (
                     <button
-                      key={cat.id}
+                      key={op.categoryId}
                       onClick={() => {
-                        setNewRecord((prev) => ({ ...prev, category: cat.id }))
+                        setNewRecord((prev) => ({ ...prev, category: op.categoryId }))
                         setIsAddModalOpen(true)
                       }}
-                      className={`flex shrink-0 flex-col items-start gap-1.5 rounded-xl border px-3 py-2.5 text-left transition-all hover:opacity-90 w-[160px] ${
-                        type === 'unclaimed'
-                          ? 'border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950/30'
-                          : 'border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30'
+                      className={`flex shrink-0 flex-col items-start gap-1.5 rounded-xl border px-3 py-2.5 text-left transition-all hover:opacity-90 w-[170px] ${
+                        op.priority === 'high'
+                          ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/30'
+                          : op.priority === 'medium'
+                            ? 'border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30'
+                            : 'border-border bg-muted/30'
                       }`}
                     >
-                      <span className={`text-xs font-semibold ${type === 'unclaimed' ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'}`}>
-                        {type === 'unclaimed' ? '0% claimed' : '<50% used'}
-                      </span>
-                      <span className="text-sm font-medium text-foreground leading-tight line-clamp-2">{cat.name}</span>
-                      <span className={`text-xs font-bold ${type === 'unclaimed' ? 'text-red-700 dark:text-red-300' : 'text-amber-700 dark:text-amber-300'}`}>
-                        RM {potential.toLocaleString()} potential
-                      </span>
+                      <div className="flex items-center justify-between w-full">
+                        <span className="text-[10px] font-semibold text-muted-foreground">{op.beCode}</span>
+                        <span className={`text-[10px] font-bold ${
+                          op.priority === 'high' ? 'text-emerald-600' : op.priority === 'medium' ? 'text-amber-600' : 'text-muted-foreground'
+                        }`}>
+                          {op.marginalRate >= 1 ? `${Math.round(op.marginalRate)}¢/RM` : 'low rate'}
+                        </span>
+                      </div>
+                      <span className="text-sm font-medium text-foreground leading-tight line-clamp-2">{op.label}</span>
+                      <div>
+                        <p className="text-xs text-muted-foreground">RM {op.remaining.toLocaleString()} remaining</p>
+                        {op.taxSaved > 0 && (
+                          <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                            → save RM {op.taxSaved.toLocaleString()} tax
+                          </p>
+                        )}
+                      </div>
                       <span className="flex items-center gap-1 text-xs text-primary mt-0.5">
                         <Plus className="h-3 w-3" />
                         Add Record
