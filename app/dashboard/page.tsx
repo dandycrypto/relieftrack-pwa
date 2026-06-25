@@ -1532,6 +1532,31 @@ useEffect(() => {
     }
   }
 
+  const handleExportAuditExcel = async () => {
+    try {
+      const { generateAuditExcel, downloadAuditExcel } = await import('@/lib/audit-export')
+      const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+      const yearRecords = records.filter((r) => r.date.startsWith(String(taxYear)))
+      const eaData = settings.eaFormByYear?.[taxYear]
+      const taxSummary = {
+        grossIncome: eaData?.grossIncome ?? profile.grossIncome ?? 0,
+        epf: eaData?.epf ?? 0,
+        socso: eaData?.socso ?? 0,
+        pcb: eaData?.pcb ?? 0,
+        reliefTotal: totalClaimed,
+        chargeableIncome: Math.max(0, (eaData?.grossIncome ?? profile.grossIncome ?? 0) - (eaData?.epf ?? 0) - (eaData?.socso ?? 0) - totalClaimed),
+        estimatedTax: 0,
+        taxAfterRebate: 0,
+        balance: 0,
+      }
+      const blob = await generateAuditExcel(yearRecords, profile, settings, reliefTotals, taxSummary, taxYear)
+      downloadAuditExcel(blob, taxYear)
+      toast.success(`Audit Excel for YA ${taxYear} downloaded!`)
+    } catch (e) {
+      toast.error("Excel export failed.")
+    }
+  }
+
   // ── Refresh ─────────────────────────────────────────────────────────────
   const handleRefresh = () => {
     setIsRefreshing(true)
@@ -3263,11 +3288,83 @@ useEffect(() => {
               </Button>
               <Button
                 variant="outline"
+                className="h-11 w-full justify-start gap-3 border-emerald-200 px-4 font-medium text-emerald-700 transition-all hover:border-emerald-300 hover:bg-emerald-50 dark:border-emerald-900 dark:text-emerald-400 dark:hover:bg-emerald-950/30"
+                onClick={handleExportAuditExcel}
+              >
+                <Download className="h-4 w-4" /> Audit Summary Excel (4-sheet)
+              </Button>
+              <Button
+                variant="outline"
                 className="h-11 w-full justify-start gap-3 border-red-200 px-4 font-medium text-red-600 transition-all hover:border-red-300 hover:bg-red-50 hover:text-red-700 active:bg-red-100 dark:border-red-900 dark:text-red-400 dark:hover:border-red-800 dark:hover:bg-red-950/40 dark:hover:text-red-300"
                 onClick={() => setShowDeleteDialog(true)}
               >
                 <AlertTriangle className="h-4 w-4" /> Delete All Records
               </Button>
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Audit Vault */}
+        <div className="space-y-3">
+          <div className="flex items-center gap-2.5 px-1">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-amber-100 dark:bg-amber-900/40">
+              <Shield className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+            </div>
+            <h2 className="font-semibold text-foreground">7-Year Audit Vault</h2>
+          </div>
+          <Card className="overflow-hidden border-0 shadow-sm ring-1 ring-border">
+            <CardContent className="p-5 space-y-3">
+              <p className="text-sm text-muted-foreground">
+                LHDN requires tax records to be retained for 7 years. Keep your evidence organised and audit-ready.
+              </p>
+              {/* Per-YA vault cards */}
+              <div className="space-y-2">
+                {Array.from({ length: 4 }, (_, i) => {
+                  const yr = new Date().getFullYear() - i
+                  const yrRecords = records.filter((r) => r.date.startsWith(String(yr)))
+                  const withReceipt = yrRecords.filter((r) => r.receiptUrl).length
+                  const completeness = yrRecords.length > 0 ? Math.round((withReceipt / yrRecords.length) * 100) : 100
+                  const retainUntil = `${yr + 7}-04-30`
+                  const isCurrentYear = yr === parseInt(settings.defaultTaxYear || String(new Date().getFullYear()))
+                  return (
+                    <div key={yr} className={cn(
+                      "rounded-xl border p-3 space-y-2",
+                      isCurrentYear ? "border-amber-200 bg-amber-50/50 dark:border-amber-800 dark:bg-amber-950/20" : "border-border"
+                    )}>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-sm">YA {yr}</span>
+                          {isCurrentYear && <Badge className="text-[10px] px-1.5 py-0 bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">Current</Badge>}
+                        </div>
+                        <span className="text-xs text-muted-foreground">Retain until {retainUntil}</span>
+                      </div>
+                      <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                        <span>{yrRecords.length} records</span>
+                        <span>·</span>
+                        <span className={completeness === 100 ? 'text-emerald-600' : completeness >= 60 ? 'text-amber-600' : 'text-red-500'}>
+                          {completeness}% evidence complete
+                        </span>
+                      </div>
+                      {yrRecords.length > 0 && (
+                        <Progress value={completeness} className="h-1.5" />
+                      )}
+                      {isCurrentYear && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-8 text-xs w-full"
+                          onClick={handleExportAuditExcel}
+                        >
+                          <Download className="h-3.5 w-3.5 mr-1.5" /> Export Excel Audit Summary
+                        </Button>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+              <p className="text-xs text-muted-foreground text-center">
+                Drive sync uploads receipts with LHDN-coded filenames for easy auditor access
+              </p>
             </CardContent>
           </Card>
         </div>
