@@ -8,7 +8,7 @@
 
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import {
   Home,
@@ -62,6 +62,9 @@ import {
   X,
   CheckCircle2,
   CameraOff,
+  BrainCircuit,
+  GitCompare,
+  Sparkles,
 } from "lucide-react"
 import { useTheme } from "next-themes"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -106,17 +109,25 @@ import {
   DrawerClose,
   DrawerFooter,
 } from "@/components/ui/drawer"
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet"
 import { cn } from "@/lib/utils"
 import { OnboardingWizard } from "@/components/OnboardingWizard"
 import { QrScanner, type QrScanResult } from "@/components/QrScanner"
 import { BulkQueue } from "@/components/BulkQueue"
+import TaxAssistant from "@/components/TaxAssistant"
 import { parseEWalletCSV, type EWalletProvider, type ParsedTransaction } from "@/lib/ewallet-parser"
 import type { DbRecord } from "@/lib/supabase"
 import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, calculateTax, calculateNetTaxBalance, type Record as ReliefRecord } from "@/store"
 import { createSupabaseBrowserClient } from "@/utils/supabase/client"
 import { performOCR, type OcrResult } from "@/lib/ocr"
-import { verifyRecord, verifyEAForm, type VerifyResult, type EAFormVerifyResult } from "@/lib/verify"
-import { exportRecordsCSV, exportRecordsPDF } from "@/lib/export"
+import { verifyRecord, verifyEAForm, findDuplicates, type VerifyResult, type EAFormVerifyResult } from "@/lib/verify"
+import { exportRecordsCSV, exportRecordsPDF, exportLHDNReference } from "@/lib/export"
+import { generateTaxReport } from "@/lib/tax-report"
 import {
   PieChart as RechartsPieChart,
   Pie,
@@ -458,6 +469,14 @@ export default function ReliefTrackApp() {
     updateTemplate,
     deleteTemplate,
     fireTemplates,
+    merchantMemory,
+    notifications,
+    learnMerchant,
+    recallCategory,
+    addNotification,
+    markNotificationRead,
+    markAllNotificationsRead,
+    clearNotifications,
     getReliefTotals,
     getApplicableReliefs,
     getTotalClaimed,
@@ -787,6 +806,26 @@ useEffect(() => {
       toast(`${fired.length} recurring record${fired.length !== 1 ? 's' : ''} added for ${month}`, {
         description: fired.slice(0, 3).join(', ') + (fired.length > 3 ? '…' : ''),
       })
+      addNotification({
+        type: 'recurring',
+        title: `${fired.length} recurring record${fired.length !== 1 ? 's' : ''} added`,
+        body: `${fired.slice(0, 3).join(', ')}${fired.length > 3 ? ` +${fired.length - 3} more` : ''} — ${month}`,
+        actionTab: 'records',
+      })
+    }
+    // Deadline reminder: push once if < 30 days to April 30
+    const taxYr = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+    const filingDeadline = new Date(`${taxYr + 1}-04-30`)
+    const daysToDeadline = Math.ceil((filingDeadline.getTime() - Date.now()) / 86400000)
+    const reminderKey = `deadline-notif-${taxYr}`
+    if (daysToDeadline > 0 && daysToDeadline <= 30 && !localStorage.getItem(reminderKey)) {
+      localStorage.setItem(reminderKey, '1')
+      addNotification({
+        type: 'reminder',
+        title: `Tax filing deadline in ${daysToDeadline} days`,
+        body: `YA ${taxYr} BE form due by 30 April ${taxYr + 1}. Make sure all records are complete.`,
+        actionTab: 'dashboard',
+      })
     }
   }, [isHydrated])
 
@@ -898,6 +937,15 @@ useEffect(() => {
   const [newTemplate, setNewTemplate] = useState({
     merchant: '', amount: '', category: 'lifestyle', dayOfMonth: 1, description: '',
   })
+
+  // ── Phase 3 feature state ─────────────────────────────────────────────────
+  const [showTaxAssistant, setShowTaxAssistant] = useState(false)
+  const [showYearComparison, setShowYearComparison] = useState(false)
+  const [showNotifications, setShowNotifications] = useState(false)
+  const [duplicateWarning, setDuplicateWarning] = useState<{
+    dupes: ReliefRecord[]
+    pendingFn: () => void
+  } | null>(null)
 
   const cameraInputRef = useRef<HTMLInputElement>(null)
   const galleryInputRef = useRef<HTMLInputElement>(null)
@@ -1254,7 +1302,30 @@ useEffect(() => {
       lhdNCategory: newRecord.lhdNCategory || undefined,
       recipient: newRecord.recipient || undefined,
     }
+
+    // Duplicate detection
+    const dupes = findDuplicates(
+      { merchant: recPayload.merchant, amount: recPayload.amount, date: recPayload.date },
+      records
+    )
+    if (dupes.length > 0) {
+      setIsSaving(false)
+      setDuplicateWarning({
+        dupes,
+        pendingFn: () => {
+          const newId = addRecord(recPayload)
+          learnMerchant(recPayload.merchant, recPayload.category)
+          toast.success("Record added successfully!")
+          closeAddDrawer()
+          syncToDrive('saveRecord', { ...recPayload, id: newId } as ReliefRecord)
+          syncNewRecordToSupabase(newId, recPayload)
+        },
+      })
+      return
+    }
+
     const newId = addRecord(recPayload)
+    learnMerchant(recPayload.merchant, recPayload.category)
     toast.success("Record added successfully!")
     if (!settings.googleDriveConnected && !settings.supabaseUserId) {
       setTimeout(() => toast("Connect Google Drive in Settings to back up your records."), 1200)
@@ -1281,7 +1352,28 @@ useEffect(() => {
       receiptFileName: uploadedFileName || undefined,
       invoiceNumber: reviewData.invoiceNumber || undefined,
     }
+
+    // Duplicate detection
+    const dupes = findDuplicates(
+      { merchant: recPayload.merchant, amount: recPayload.amount, date: recPayload.date },
+      records
+    )
+    if (dupes.length > 0) {
+      setDuplicateWarning({
+        dupes,
+        pendingFn: () => {
+          const newId = addRecord(recPayload)
+          learnMerchant(recPayload.merchant, recPayload.category)
+          toast.success("Record added successfully!")
+          syncNewRecordToSupabase(newId, recPayload)
+          closeAddDrawer()
+        },
+      })
+      return
+    }
+
     const newId = addRecord(recPayload)
+    learnMerchant(recPayload.merchant, recPayload.category)
     toast.success("Record added successfully!")
     if (!settings.googleDriveConnected && !settings.supabaseUserId) {
       setTimeout(() => toast("Connect Google Drive in Settings to back up your records."), 1200)
@@ -1366,6 +1458,24 @@ useEffect(() => {
         totalPossible
       )
       toast.success("PDF summary exported!")
+    } catch {
+      toast.error("Export failed.")
+    }
+  }
+
+  const handleExportTaxReport = () => {
+    try {
+      generateTaxReport(displayRecords, profile, settings, reliefTotals)
+      toast.success("Annual tax report downloaded!")
+    } catch {
+      toast.error("Report generation failed.")
+    }
+  }
+
+  const handleExportLHDN = () => {
+    try {
+      exportLHDNReference(displayRecords, profile, reliefTotals, settings.defaultTaxYear)
+      toast.success("LHDN reference CSV downloaded!")
     } catch {
       toast.error("Export failed.")
     }
@@ -1573,7 +1683,21 @@ useEffect(() => {
                 <ChevronDown className="h-3 w-3" />
               </button>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
+              {/* Notification Bell */}
+              <Button
+                variant="ghost"
+                size="icon"
+                className="relative h-9 w-9"
+                onClick={() => setShowNotifications(true)}
+              >
+                <Bell className="h-4 w-4" />
+                {notifications.filter((n) => !n.read).length > 0 && (
+                  <span className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[9px] font-bold text-white">
+                    {Math.min(notifications.filter((n) => !n.read).length, 9)}
+                  </span>
+                )}
+              </Button>
               {mounted && (
                 <Button
                   variant="ghost"
@@ -1745,6 +1869,109 @@ useEffect(() => {
 
                   </div>
                 )}
+              </div>
+            )
+          })()}
+
+          {/* What's Missing — proactive action engine */}
+          {(() => {
+            const actionItems = applicableReliefs
+              .filter((cat) => cat.id !== 'individual')
+              .map((cat) => {
+                const claimed = reliefTotals[cat.id] || 0
+                const limit = cat.perItem
+                  ? cat.id === 'children_under18' ? displayProfile.childrenUnder18 * cat.maxLimit
+                  : displayProfile.childrenEducation * cat.maxLimit
+                  : cat.maxLimit
+                const pct = limit > 0 ? claimed / limit : 0
+                if (claimed === 0) return { cat, type: 'unclaimed' as const, potential: limit }
+                if (pct < 0.5) return { cat, type: 'underutilized' as const, potential: Math.round(limit - claimed) }
+                return null
+              })
+              .filter(Boolean)
+              .sort((a, b) => (b!.potential - a!.potential))
+              .slice(0, 5) as Array<{ cat: typeof applicableReliefs[0]; type: 'unclaimed' | 'underutilized'; potential: number }>
+            if (actionItems.length === 0) return null
+            return (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Sparkles className="h-4 w-4 text-amber-500" />
+                    <h2 className="font-semibold text-foreground">What's Missing?</h2>
+                  </div>
+                  <span className="text-xs text-muted-foreground">{actionItems.length} opportunities</span>
+                </div>
+                <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+                  {actionItems.map(({ cat, type, potential }) => (
+                    <button
+                      key={cat.id}
+                      onClick={() => {
+                        setNewRecord((prev) => ({ ...prev, category: cat.id }))
+                        setIsAddModalOpen(true)
+                      }}
+                      className={`flex shrink-0 flex-col items-start gap-1.5 rounded-xl border px-3 py-2.5 text-left transition-all hover:opacity-90 w-[160px] ${
+                        type === 'unclaimed'
+                          ? 'border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950/30'
+                          : 'border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30'
+                      }`}
+                    >
+                      <span className={`text-xs font-semibold ${type === 'unclaimed' ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'}`}>
+                        {type === 'unclaimed' ? '0% claimed' : '<50% used'}
+                      </span>
+                      <span className="text-sm font-medium text-foreground leading-tight line-clamp-2">{cat.name}</span>
+                      <span className={`text-xs font-bold ${type === 'unclaimed' ? 'text-red-700 dark:text-red-300' : 'text-amber-700 dark:text-amber-300'}`}>
+                        RM {potential.toLocaleString()} potential
+                      </span>
+                      <span className="flex items-center gap-1 text-xs text-primary mt-0.5">
+                        <Plus className="h-3 w-3" />
+                        Add Record
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* Year Comparison Toggle */}
+          <div className="flex items-center justify-between">
+            <h2 className="font-semibold text-foreground">Overview</h2>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 text-xs text-muted-foreground"
+              onClick={() => setShowYearComparison(!showYearComparison)}
+            >
+              <GitCompare className="h-3.5 w-3.5" />
+              Compare Years
+            </Button>
+          </div>
+
+          {/* Year Comparison View */}
+          {showYearComparison && (() => {
+            const currentYr = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+            const prevYr = currentYr - 1
+            const currentRecs = displayRecords.filter((r) => r.date.startsWith(String(currentYr)))
+            const prevRecs = displayRecords.filter((r) => r.date.startsWith(String(prevYr)))
+            const sumRecs = (recs: ReliefRecord[]) => recs.reduce((s, r) => s + r.amount, 0)
+            const catCounts = (recs: ReliefRecord[]) => {
+              const cnt: Record<string, number> = {}
+              recs.forEach((r) => { cnt[r.category] = (cnt[r.category] || 0) + r.amount })
+              const top = Object.entries(cnt).sort((a, b) => b[1] - a[1])[0]
+              return { total: sumRecs(recs), count: recs.length, topCat: top ? RELIEF_CATEGORIES.find(c => c.id === top[0])?.name?.split(' ')[0] : '—' }
+            }
+            const curr = catCounts(currentRecs)
+            const prev = catCounts(prevRecs)
+            return (
+              <div className="grid grid-cols-2 gap-3">
+                {[{ yr: currentYr, data: curr, primary: true }, { yr: prevYr, data: prev, primary: false }].map(({ yr, data, primary }) => (
+                  <div key={yr} className={`rounded-xl border p-3 space-y-1.5 ${primary ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/20' : 'border-muted bg-muted/30'}`}>
+                    <p className={`text-xs font-semibold ${primary ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground'}`}>YA {yr}</p>
+                    <p className="text-lg font-bold text-foreground">RM {data.total.toLocaleString()}</p>
+                    <p className="text-xs text-muted-foreground">{data.count} records</p>
+                    <p className="text-xs text-muted-foreground">Top: {data.topCat}</p>
+                  </div>
+                ))}
               </div>
             )
           })()}
@@ -2971,6 +3198,20 @@ useEffect(() => {
               </Button>
               <Button
                 variant="outline"
+                className="h-11 w-full justify-start gap-3 border-purple-200 px-4 font-medium text-purple-700 transition-all hover:border-purple-300 hover:bg-purple-50 dark:border-purple-900 dark:text-purple-400 dark:hover:bg-purple-950/30"
+                onClick={handleExportTaxReport}
+              >
+                <FileText className="h-4 w-4" /> Download Tax Report (PDF)
+              </Button>
+              <Button
+                variant="outline"
+                className="h-11 w-full justify-start gap-3 border-blue-200 px-4 font-medium text-blue-700 transition-all hover:border-blue-300 hover:bg-blue-50 dark:border-blue-900 dark:text-blue-400 dark:hover:bg-blue-950/30"
+                onClick={handleExportLHDN}
+              >
+                <Download className="h-4 w-4" /> LHDN BE Form Reference (CSV)
+              </Button>
+              <Button
+                variant="outline"
                 className="h-11 w-full justify-start gap-3 border-red-200 px-4 font-medium text-red-600 transition-all hover:border-red-300 hover:bg-red-50 hover:text-red-700 active:bg-red-100 dark:border-red-900 dark:text-red-400 dark:hover:border-red-800 dark:hover:bg-red-950/40 dark:hover:text-red-300"
                 onClick={() => setShowDeleteDialog(true)}
               >
@@ -3271,10 +3512,19 @@ useEffect(() => {
               {/* 3 primary fields */}
               <div className="space-y-3">
                 <div className="space-y-1.5">
-                  <Label className="text-sm font-medium">Merchant</Label>
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm font-medium">Merchant</Label>
+                    {reviewData.vendor && recallCategory(reviewData.vendor) && recallCategory(reviewData.vendor) !== reviewData.category && (
+                      <span className="text-xs text-purple-600 dark:text-purple-400">Memory: {RELIEF_CATEGORIES.find(c => c.id === recallCategory(reviewData.vendor))?.name?.split(' ')[0]}</span>
+                    )}
+                  </div>
                   <Input
                     value={reviewData.vendor}
-                    onChange={(e) => setReviewData({ ...reviewData, vendor: e.target.value })}
+                    onChange={(e) => {
+                      const vendor = e.target.value
+                      const remembered = recallCategory(vendor)
+                      setReviewData({ ...reviewData, vendor, ...(remembered ? { category: remembered } : {}) })
+                    }}
                     className="h-11 font-medium"
                     placeholder="Merchant name"
                   />
@@ -3402,6 +3652,7 @@ useEffect(() => {
           {showBulkQueue && bulkFiles.length > 0 && (
             <BulkQueue
               files={bulkFiles}
+              recallCategory={recallCategory}
               onCancel={() => { setShowBulkQueue(false); setBulkFiles([]) }}
               onDone={(saved, skipped) => {
                 setShowBulkQueue(false)
@@ -4264,6 +4515,140 @@ useEffect(() => {
           </DrawerFooter>
         </DrawerContent>
       </Drawer>
+
+      {/* ── Notification Center Sheet ── */}
+      <Sheet open={showNotifications} onOpenChange={(v) => !v && setShowNotifications(false)}>
+        <SheetContent side="right" className="w-full sm:w-[380px] p-0 flex flex-col">
+          <SheetHeader className="px-4 py-3 border-b">
+            <div className="flex items-center justify-between">
+              <SheetTitle className="text-base font-semibold">Notifications</SheetTitle>
+              {notifications.length > 0 && (
+                <button
+                  onClick={markAllNotificationsRead}
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                >
+                  Mark all read
+                </button>
+              )}
+            </div>
+          </SheetHeader>
+          <div className="flex-1 overflow-y-auto">
+            {notifications.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground py-16">
+                <Bell className="h-10 w-10 opacity-30" />
+                <p className="text-sm font-medium">All caught up</p>
+                <p className="text-xs opacity-70">No notifications yet</p>
+              </div>
+            ) : (
+              <div className="divide-y">
+                {notifications.map((n) => (
+                  <div
+                    key={n.id}
+                    className={`flex items-start gap-3 px-4 py-3 transition-colors ${n.read ? '' : 'bg-blue-50 dark:bg-blue-950/20'}`}
+                  >
+                    <div className="mt-0.5 text-lg shrink-0">
+                      {n.type === 'milestone' ? '🏆' : n.type === 'reminder' ? '📅' : n.type === 'recurring' ? '🔄' : n.type === 'tip' ? '💡' : '📬'}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-sm font-medium ${n.read ? 'text-foreground' : 'text-foreground'}`}>{n.title}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{n.body}</p>
+                      <p className="text-[10px] text-muted-foreground/60 mt-1">
+                        {formatDistanceToNow(new Date(n.createdAt), { addSuffix: true })}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => markNotificationRead(n.id)}
+                      className="text-muted-foreground/40 hover:text-muted-foreground shrink-0 mt-0.5"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          {notifications.length > 0 && (
+            <div className="px-4 py-3 border-t">
+              <button
+                onClick={clearNotifications}
+                className="text-xs text-red-400 hover:text-red-600 w-full text-center"
+              >
+                Clear all notifications
+              </button>
+            </div>
+          )}
+        </SheetContent>
+      </Sheet>
+
+      {/* ── Duplicate Warning AlertDialog ── */}
+      <AlertDialog open={!!duplicateWarning} onOpenChange={(o) => !o && setDuplicateWarning(null)}>
+        <AlertDialogContent className="max-w-sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2 text-amber-600">
+              <AlertTriangle className="h-5 w-5" /> Possible Duplicate
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div>
+                <p>This looks similar to an existing record:</p>
+                <div className="mt-2 space-y-1">
+                  {(duplicateWarning?.dupes ?? []).slice(0, 3).map((d) => (
+                    <div key={d.id} className="rounded-md bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs">
+                      <span className="font-medium">{d.merchant}</span>
+                      {' · '}{formatRM(d.amount)}{' · '}{d.date}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setDuplicateWarning(null)}>Discard</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-amber-600 hover:bg-amber-700"
+              onClick={() => {
+                duplicateWarning?.pendingFn()
+                setDuplicateWarning(null)
+              }}
+            >
+              Save Anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* ── AI Tax Assistant ── */}
+      <TaxAssistant
+        open={showTaxAssistant}
+        onClose={() => setShowTaxAssistant(false)}
+        context={{
+          taxYear: settings.defaultTaxYear,
+          grossIncome: displayProfile.grossIncome || 0,
+          totalClaimed: totalClaimed,
+          totalPossible: totalPossible,
+          estimatedSavings: estimatedSavings,
+          reliefTotals: reliefTotals,
+          profileName: displayProfile.name || 'there',
+          maritalStatus: displayProfile.maritalStatus || 'single',
+          childrenUnder18: displayProfile.childrenUnder18 || 0,
+          childrenEducation: displayProfile.childrenEducation || 0,
+          hasParents: !!displayProfile.hasParents,
+          isFirstHomeOwner: !!displayProfile.isFirstHomeOwner,
+          recordCount: displayRecords.filter(r => r.date.startsWith(settings.defaultTaxYear)).length,
+          pcbPaid: displayProfile.pcbPaid || 0,
+          chargeableIncome: Math.max(0, (displayProfile.grossIncome || 0) - (displayProfile.epfContribution || 0) - totalClaimed),
+        }}
+      />
+
+      {/* ── Floating Ask AI Button (dashboard tab only) ── */}
+      {activeTab === 'dashboard' && (
+        <button
+          onClick={() => setShowTaxAssistant(true)}
+          className="fixed bottom-[calc(8vh+env(safe-area-inset-bottom)+12px)] right-4 z-40 flex items-center gap-2 rounded-full bg-gradient-to-r from-purple-600 to-violet-600 px-4 py-2.5 text-sm font-medium text-white shadow-lg transition-transform hover:scale-105 active:scale-95"
+        >
+          <BrainCircuit className="h-4 w-4" />
+          Ask AI
+        </button>
+      )}
 
       {/* ── Bottom Navigation ── */}
       <nav className="sticky bottom-0 border-t border-border bg-background/95 backdrop-blur pb-[env(safe-area-inset-bottom)]">

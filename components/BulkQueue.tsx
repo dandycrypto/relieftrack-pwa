@@ -38,11 +38,12 @@ interface Props {
   onDone: (saved: number, skipped: number) => void
   onCancel: () => void
   onSave: (data: ReviewData & { receiptUrl?: string; receiptFileName?: string }) => void
+  recallCategory?: (merchant: string) => string | undefined
 }
 
 const MAX_CONCURRENT = 3
 
-export function BulkQueue({ files, onDone, onCancel, onSave }: Props) {
+export function BulkQueue({ files, onDone, onCancel, onSave, recallCategory }: Props) {
   const [queue, setQueue] = useState<QueueItem[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [savedCount, setSavedCount] = useState(0)
@@ -295,7 +296,15 @@ export function BulkQueue({ files, onDone, onCancel, onSave }: Props) {
                 <Label className="text-xs text-muted-foreground">Merchant</Label>
                 <Input
                   value={editData.vendor}
-                  onChange={(e) => setEditData({ ...editData, vendor: e.target.value })}
+                  onChange={(e) => {
+                    const newVendor = e.target.value
+                    const remembered = recallCategory?.(newVendor)
+                    setEditData({
+                      ...editData,
+                      vendor: newVendor,
+                      ...(remembered ? { category: remembered } : {}),
+                    })
+                  }}
                   className="h-10"
                   placeholder="Merchant name"
                 />

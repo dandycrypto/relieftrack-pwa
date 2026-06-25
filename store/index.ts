@@ -72,6 +72,16 @@ export interface RecurringTemplate {
   lastFiredMonth?: string  // 'YYYY-MM' to avoid double-firing
 }
 
+export interface AppNotification {
+  id: string
+  type: 'milestone' | 'reminder' | 'recurring' | 'email_receipt' | 'tip'
+  title: string
+  body: string
+  read: boolean
+  createdAt: string  // ISO
+  actionTab?: string  // 'dashboard'|'records'|'settings'
+}
+
 export interface Profile {
   name: string
   maritalStatus: MaritalStatus
@@ -333,6 +343,8 @@ interface ReliefStore {
   profile: Profile
   settings: Settings
   recurringTemplates: RecurringTemplate[]
+  merchantMemory: { [merchant: string]: string }  // merchant.toLowerCase() → categoryId
+  notifications: AppNotification[]
   isHydrated: boolean
 
   // Record Actions — id is optional; caller can pre-generate for sync purposes
@@ -354,6 +366,16 @@ interface ReliefStore {
   deleteTemplate: (id: string) => void
   fireTemplates: () => string[]  // fires due templates; returns list of merchant names
 
+  // Merchant Memory Actions
+  learnMerchant: (merchant: string, category: string) => void
+  recallCategory: (merchant: string) => string | undefined
+
+  // Notification Actions
+  addNotification: (n: Omit<AppNotification, 'id' | 'read' | 'createdAt'>) => void
+  markNotificationRead: (id: string) => void
+  markAllNotificationsRead: () => void
+  clearNotifications: () => void
+
   // Computed helpers (called from components)
   getReliefTotals: () => Record<string, number>
   getApplicableReliefs: () => ReliefCategory[]
@@ -374,6 +396,8 @@ export const useReliefStore = create<ReliefStore>()(
       profile: INITIAL_PROFILE,
       settings: INITIAL_SETTINGS,
       recurringTemplates: [],
+      merchantMemory: {},
+      notifications: [],
       isHydrated: false,
 
       setHydrated: (val) => set({ isHydrated: val }),
@@ -454,6 +478,48 @@ export const useReliefStore = create<ReliefStore>()(
         }
         return firedMerchants
       },
+
+      // ── Merchant Memory Actions ───────────────────────────────────────────
+
+      learnMerchant: (merchant, category) => {
+        if (!merchant || !category) return
+        const key = merchant.toLowerCase().trim()
+        set((state) => ({
+          merchantMemory: { ...state.merchantMemory, [key]: category },
+        }))
+      },
+
+      recallCategory: (merchant) => {
+        if (!merchant) return undefined
+        const key = merchant.toLowerCase().trim()
+        return get().merchantMemory[key]
+      },
+
+      // ── Notification Actions ──────────────────────────────────────────────
+
+      addNotification: (n) => {
+        const id = `notif-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+        set((state) => ({
+          notifications: [
+            { ...n, id, read: false, createdAt: new Date().toISOString() },
+            ...state.notifications,
+          ].slice(0, 50), // keep max 50
+        }))
+      },
+
+      markNotificationRead: (id) => {
+        set((state) => ({
+          notifications: state.notifications.map((n) => n.id === id ? { ...n, read: true } : n),
+        }))
+      },
+
+      markAllNotificationsRead: () => {
+        set((state) => ({
+          notifications: state.notifications.map((n) => ({ ...n, read: true })),
+        }))
+      },
+
+      clearNotifications: () => set({ notifications: [] }),
 
       // ── Profile Actions ───────────────────────────────────────────────────
 
@@ -618,6 +684,8 @@ export const useReliefStore = create<ReliefStore>()(
         profile: state.profile,
         settings: state.settings,
         recurringTemplates: state.recurringTemplates,
+        merchantMemory: state.merchantMemory,
+        notifications: state.notifications,
       }),
     }
   )

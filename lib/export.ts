@@ -4,6 +4,7 @@
 
 import { jsPDF } from 'jspdf'
 import type { Record, Profile, ReliefCategory } from '@/store'
+import { RELIEF_CATEGORIES } from '@/store'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -230,6 +231,75 @@ export function exportRecordsPDF(
 
   // Save
   doc.save(`relieftack-summary-${new Date().toISOString().split('T')[0]}.pdf`)
+}
+
+// ─── LHDN BE Form Reference Export ──────────────────────────────────────────
+
+const LHDN_CODES: Record<string, string> = {
+  individual: 'D1',
+  medical_self: 'D7',
+  parents_medical: 'D6',
+  disabled: 'D2',
+  disabled_equipment: 'D4',
+  spouse: 'D8',
+  children_under18: 'D9',
+  children_education: 'D10',
+  education_self: 'D11',
+  lifestyle: 'D14',
+  epf_insurance: 'D12/D13',
+  housing_loan: 'D16',
+}
+
+export function exportLHDNReference(
+  records: Record[],
+  profile: Profile,
+  reliefTotals: { [catId: string]: number },
+  taxYear: string
+): void {
+  const lines: string[] = []
+
+  lines.push(`LHDN BE FORM REFERENCE — YEAR OF ASSESSMENT ${taxYear}`)
+  lines.push(`Name: ${profile.name}`)
+  lines.push(`Generated: ${new Date().toLocaleDateString('en-MY')}`)
+  lines.push(`Note: For personal reference only. Not an official LHDN document.`)
+  lines.push('')
+  lines.push('SECTION D — PERSONAL RELIEFS')
+  lines.push('Code,Relief Category,Amount Claimed (RM),Eligible Limit (RM),Utilised %')
+
+  RELIEF_CATEGORIES.forEach((cat) => {
+    const claimed = reliefTotals[cat.id] || 0
+    const limit = cat.perItem
+      ? cat.id === 'children_under18' ? profile.childrenUnder18 * cat.maxLimit
+      : profile.childrenEducation * cat.maxLimit
+      : cat.maxLimit
+    const pct = limit > 0 ? Math.round((claimed / limit) * 100) : 0
+    const code = LHDN_CODES[cat.id] || '—'
+    lines.push(`${code},"${cat.name}",${claimed.toFixed(2)},${limit.toFixed(2)},${pct}%`)
+  })
+
+  const total = Object.values(reliefTotals).reduce((s, v) => s + v, 0)
+  lines.push(`,"TOTAL RELIEF",${total.toFixed(2)},,`)
+  lines.push('')
+  lines.push('RECORD DETAILS')
+  lines.push('Date,Category,Merchant,Description,Amount (RM),Status')
+
+  const yearRecords = records.filter((r) => r.date.startsWith(taxYear))
+  yearRecords.forEach((rec) => {
+    const catName = RELIEF_CATEGORIES.find((c) => c.id === rec.category)?.name || rec.category
+    lines.push([
+      rec.date,
+      `"${catName}"`,
+      `"${rec.merchant.replace(/"/g, '""')}"`,
+      `"${rec.description.replace(/"/g, '""')}"`,
+      rec.amount.toFixed(2),
+      rec.status,
+    ].join(','))
+  })
+
+  downloadBlob(
+    new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' }),
+    `lhdn-reference-ya${taxYear}-${new Date().toISOString().split('T')[0]}.csv`
+  )
 }
 
 // ─── Blob Download ──────────────────────────────────────────────────────────
