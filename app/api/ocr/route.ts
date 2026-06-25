@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { spawn, execSync } from 'child_process'
+import { spawn, spawnSync } from 'child_process'
 import { writeFile, unlink, mkdir, readFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import path from 'path'
@@ -577,7 +577,8 @@ export async function POST(request: NextRequest) {
 
       try {
         // Step 1: try pdftotext -layout (native PDF text extraction)
-        execSync('pdftotext', ['-layout', tmpPath, txtOutPath], { timeout: 30000 })
+        const r1 = spawnSync('pdftotext', ['-layout', tmpPath, txtOutPath], { timeout: 30000 })
+        if (r1.error) throw r1.error
         const pdfRaw = await readFile(txtOutPath, 'utf8')
 
         if (pdfRaw.trim().length > 100) {
@@ -596,7 +597,8 @@ export async function POST(request: NextRequest) {
       // If pdftotext didn't work, convert PDF pages to images for OCR
       if (!pdfUsedPdftotext) {
         const imgBase = path.join(tmpDir, baseName)
-        execSync('pdftoppm', ['-jpeg', '-r', '200', tmpPath, imgBase], { timeout: 60000 })
+        const r2 = spawnSync('pdftoppm', ['-jpeg', '-r', '200', tmpPath, imgBase], { timeout: 60000 })
+        if (r2.error) throw r2.error
         const { readdirSync } = await import('fs')
         const files = readdirSync(tmpDir).filter(f => f.startsWith(baseName) && f.endsWith('.jpg'))
         const imagePaths = files.sort().map(f => path.join(tmpDir, f))

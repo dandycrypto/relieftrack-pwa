@@ -1,5 +1,5 @@
 /**
- * LHDN Tax Relief Categories — Years of Assessment 2019–2025
+ * LHDN Tax Relief Categories — Years of Assessment 2019–2026
  * Sourced from official LHDN guidelines (hasil.gov.my)
  *
  * Each year's record maps to ReliefCategory.id via the `category` field.
@@ -126,6 +126,28 @@ export const TAX_RELIEFS: Record<number, TaxReliefItem[]> = {
   2025: [
     { category: 'individual', item: 'Individual & Dependent Relatives', maxAmount: 9000, notes: 'Automatic for all taxpayers' },
     { category: 'medical_self', item: 'Medical (Self, Spouse, Children)', maxAmount: 10000, notes: 'Serious diseases, fertility, dental, vaccination, mental health, complete health检查' },
+    { category: 'parents_medical', item: 'Parents Medical & Carer', maxAmount: 8000, notes: 'Medical expenses for parents (father/mother/grandparents)' },
+    { category: 'disabled', item: 'Disabled Individual', maxAmount: 7000, notes: 'Disabled person self/spouse/child' },
+    { category: 'disabled_equipment', item: 'Disabled Equipment', maxAmount: 6000, notes: 'Supporting equipment for disabled person' },
+    { category: 'spouse', item: 'Spouse / Alimony', maxAmount: 4000, notes: 'Non-working spouse or alimony payments' },
+    { category: 'children_under18', item: 'Children (Under 18)', maxAmount: 2000, notes: 'Per child, max RM 2,000 each' },
+    { category: 'children_education', item: 'Children (Higher Education)', maxAmount: 8000, notes: 'Diploma and above in Malaysia; exam fees also claimable' },
+    { category: 'education_self', item: 'Education (Self)', maxAmount: 7000, notes: 'Degree, Masters, professional qualification (max 3 consecutive years)' },
+    { category: 'lifestyle', item: 'Lifestyle', maxAmount: 3500, notes: 'Books, newspapers, sporting equipment, PC, smartphone, internet, streaming subscriptions, gym, courses, e-learning' },
+    { category: 'epf_insurance', item: 'EPF / Life Insurance / Takaful', maxAmount: 7000, notes: 'EPF contributions (cap RM 4,000) + life insurance/takaful (cap RM 3,000)' },
+    { category: 'housing_loan', item: 'Housing Loan Interest', maxAmount: 7000, notes: 'First residential property; also applies to cooperative housing loans' },
+    { category: 'socso', item: 'SOCSO / PERKESO', maxAmount: 400, notes: 'Employee and employer SOCSO contributions' },
+    { category: 'private_pension', item: 'Private Pension / PRS', maxAmount: 3000, notes: 'PRS contributions' },
+    { category: 'retirement_savings', item: 'Net Savings in Private Retirement Scheme', maxAmount: 3000, notes: 'Net savings in PRS fund withdrawn for retirement (exempt from tax)' },
+    { category: 'zakat', item: 'Zakat / Tithes', maxAmount: 0, notes: 'Unlimited (subject to total income); paid to Pusat Zakat or mosque authorities' },
+    { category: 'cash_giving', item: 'Cash Gifts to Family / Religious Institution', maxAmount: 0, notes: 'Deductible if recipient is registered organization; amount based on actual payment' },
+  ],
+
+  // ── Year of Assessment 2026 ──────────────────────────────────────────────
+  // Limits unchanged from YA 2025 pending official LHDN Budget 2026 announcement
+  2026: [
+    { category: 'individual', item: 'Individual & Dependent Relatives', maxAmount: 9000, notes: 'Automatic for all taxpayers' },
+    { category: 'medical_self', item: 'Medical (Self, Spouse, Children)', maxAmount: 10000, notes: 'Serious diseases, fertility, dental, vaccination, mental health, complete health check' },
     { category: 'parents_medical', item: 'Parents Medical & Carer', maxAmount: 8000, notes: 'Medical expenses for parents (father/mother/grandparents)' },
     { category: 'disabled', item: 'Disabled Individual', maxAmount: 7000, notes: 'Disabled person self/spouse/child' },
     { category: 'disabled_equipment', item: 'Disabled Equipment', maxAmount: 6000, notes: 'Supporting equipment for disabled person' },

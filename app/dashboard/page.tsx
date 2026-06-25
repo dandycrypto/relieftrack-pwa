@@ -774,6 +774,7 @@ useEffect(() => {
   const [taxDetailsExpanded, setTaxDetailsExpanded] = useState(false)
   const [showSaveSuccessDialog, setShowSaveSuccessDialog] = useState(false)
   const [showDriveConnectPrompt, setShowDriveConnectPrompt] = useState(false)
+  const [yearPickerOpen, setYearPickerOpen] = useState(false)
   const [eaFormDialogOpen, setEaFormDialogOpen] = useState(false)
   const [eaFormData, setEaFormData] = useState<{
     employeeName: string; icNumber: string; employerName: string
@@ -880,14 +881,15 @@ useEffect(() => {
   const totalPossible = getTotalPossible()
   const estimatedSavings = getEstimatedTaxSavings()
 
-  // Tax deadline
+  // Tax deadline — dynamic based on selected assessment year
   const getDeadlineInfo = () => {
-    const deadline = new Date("2026-04-30")
+    const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+    const deadline = new Date(`${taxYear + 1}-04-30`)
     const today = new Date()
     const diffDays = Math.ceil(
       (deadline.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
     )
-    return { days: diffDays, date: "30 April 2026" }
+    return { days: diffDays, date: `30 April ${taxYear + 1}` }
   }
 
   // Filtered records (uses displayRecords — either demo or real)
@@ -963,52 +965,20 @@ useEffect(() => {
       setReviewData({
         vendor: result.vendor || '',
         amount: result.amount ? String(Math.round(result.amount)) : '',
-        date: result.date || new Date().toISOString().split("T")[0],
-        description: '',   // not in Python contract — TODO: derive from raw_text if needed
+        date: result.date || `${settings.defaultTaxYear}-${new Date().toISOString().slice(5, 10)}`,
+        description: '',
         invoiceNumber: result.invoice_number || '',
         confidence: result.confidence,
         rawText: result.raw_text,
         category: result.category || 'lifestyle',
       })
       setShowOcrReview(true)
-
-      // Background: upload to Google Drive (don't block the form)
-      if (receiptPreview) {
-        uploadReceiptToDrive(receiptPreview, file.name, result.date || new Date().toISOString().split("T")[0])
-      }
     } catch (err) {
       console.error("OCR failed:", err)
       toast.error("OCR failed. Please enter details manually.")
       setShowOCRForm(true)
     } finally {
       setIsProcessing(false)
-    }
-  }
-
-  // ── Background Drive Upload ───────────────────────────────────────────
-  const uploadReceiptToDrive = async (dataUrl: string, filename: string, date: string) => {
-    try {
-      const base64Data = dataUrl.split(",")[1] || dataUrl
-      const resp = await fetch("http://localhost:5001/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          image: base64Data,
-          filename: filename,
-          date: date,
-        }),
-      })
-      if (resp.ok) {
-        const json = await resp.json()
-        if (json.driveLink) {
-          // Update receiptPreview to the Drive link (shows as text in preview area)
-          setReceiptPreview(json.driveLink)
-          toast.success("Receipt uploaded to Google Drive!")
-        }
-      }
-    } catch (e) {
-      // Silently fail — Drive upload is bonus, shouldn't block the form
-      console.warn("Drive upload failed:", e)
     }
   }
 
@@ -1100,8 +1070,13 @@ useEffect(() => {
     recipient: "auto",
   })
   useEffect(() => {
-    setNewRecord(prev => ({ ...prev, date: new Date().toISOString().split("T")[0] }))
-  }, [])
+    const today = new Date()
+    const selectedYA = parseInt(settings.defaultTaxYear) || today.getFullYear()
+    const dateStr = today.getFullYear() === selectedYA
+      ? today.toISOString().split("T")[0]
+      : `${selectedYA}-12-31`
+    setNewRecord(prev => ({ ...prev, date: dateStr }))
+  }, [settings.defaultTaxYear])
 
   const formScrollRef = useRef<HTMLDivElement>(null)
 
@@ -1482,9 +1457,13 @@ useEffect(() => {
                 <h1 className="text-xl font-bold text-foreground">ReliefTrack MY</h1>
                 <span className="text-base">🇲🇾</span>
               </div>
-              <p className=" text-muted-foreground">
-                Year of Assessment {settings.defaultTaxYear}
-              </p>
+              <button
+                onClick={() => setYearPickerOpen(true)}
+                className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <span>Year of Assessment {settings.defaultTaxYear}</span>
+                <ChevronDown className="h-3 w-3" />
+              </button>
             </div>
             <div className="flex items-center gap-2">
               {mounted && (
@@ -1528,18 +1507,22 @@ useEffect(() => {
           {/* Top chips row: Deadline only (LHDN bracket moved into Tax Details) */}
           <div className="flex items-center gap-2 flex-wrap">
             {/* Deadline Chip */}
-            {deadline.days <= 30 && (
+            {deadline.days <= 90 && (
               <div className={cn(
                 "flex items-center justify-between rounded-lg px-3 py-2 text-sm",
-                deadline.days < 3 ? "bg-red-100 text-red-700" :
-                deadline.days <= 13 ? "bg-amber-100 text-amber-700" :
-                "bg-emerald-100 text-emerald-700"
+                deadline.days < 0 ? "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400" :
+                deadline.days < 3 ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" :
+                deadline.days <= 13 ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" :
+                "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
               )}>
                 <div className="flex items-center gap-2">
                   <CalendarClock className="h-4 w-4" />
-                  <span>Tax Filing Deadline: <strong>{deadline.days} days</strong> left</span>
+                  {deadline.days < 0
+                    ? <span>YA {settings.defaultTaxYear} filing deadline passed ({deadline.date})</span>
+                    : <span>Tax Filing Deadline: <strong>{deadline.days} days</strong> left</span>
+                  }
                 </div>
-                <span className="text-xs opacity-75 ml-2">{deadline.date}</span>
+                {deadline.days >= 0 && <span className="text-xs opacity-75 ml-2">{deadline.date}</span>}
               </div>
             )}
           </div>
@@ -3696,6 +3679,36 @@ useEffect(() => {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* ── Year of Assessment Picker ── */}
+      <Dialog open={yearPickerOpen} onOpenChange={setYearPickerOpen}>
+        <DialogContent className="max-w-xs">
+          <DialogHeader>
+            <DialogTitle>Select Year of Assessment</DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-2 py-2">
+            {['2023', '2024', '2025', '2026', '2027'].map((yr) => (
+              <button
+                key={yr}
+                onClick={() => {
+                  updateSettings({ defaultTaxYear: yr })
+                  setYearPickerOpen(false)
+                }}
+                className={cn(
+                  "flex items-center justify-between rounded-lg border px-4 py-3 text-sm font-medium transition-colors",
+                  settings.defaultTaxYear === yr
+                    ? "border-emerald-500 bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                    : "border-border hover:bg-muted"
+                )}
+              >
+                <span>YA {yr}</span>
+                {settings.defaultTaxYear === yr && <Check className="h-4 w-4" />}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground pb-1">Records and tax calculations update to match the selected year.</p>
+        </DialogContent>
+      </Dialog>
 
       {/* ── EA Form Confirmation Drawer ── */}
       <Drawer open={eaFormDialogOpen} onOpenChange={(open) => { setEaFormDialogOpen(open); if (!open) setEaFormVerifyResult(null) }}>

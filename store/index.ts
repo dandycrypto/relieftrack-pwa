@@ -10,7 +10,7 @@ import { persist } from 'zustand/middleware'
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
-export type TaxYear = '2025' | '2026'
+export type TaxYear = string
 export type Language = 'en' | 'ms'
 export type ThemePreference = 'light' | 'dark' | 'system'
 export type MaritalStatus = 'single' | 'married' | 'divorced'
@@ -279,7 +279,7 @@ export const INITIAL_SETTINGS: Settings = {
   biometricLock: false,
   language: 'en',
   themePreference: 'system',
-  defaultTaxYear: '2025',
+  defaultTaxYear: String(new Date().getFullYear()),
   eaFormByYear: {},
 }
 
