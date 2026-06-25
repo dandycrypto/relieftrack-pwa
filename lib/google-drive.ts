@@ -38,6 +38,14 @@ function authHeaders(accessToken: string) {
   return { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }
 }
 
+async function ensureOk(res: Response): Promise<any> {
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`Drive API error ${res.status}: ${body}`)
+  }
+  return res.json()
+}
+
 async function createMultipart(
   accessToken: string,
   folderId: string,
@@ -72,7 +80,7 @@ export async function findOrCreateRootFolder(accessToken: string): Promise<strin
   const q = encodeURIComponent('name="ReliefTrack MY" and mimeType="application/vnd.google-apps.folder" and trashed=false')
   const search = await fetch(`${DRIVE_API}/files?q=${q}&fields=files(id,name)`, {
     headers: authHeaders(accessToken),
-  }).then((r) => r.json())
+  }).then(ensureOk)
 
   if (search.files?.length) return search.files[0].id
 
@@ -80,7 +88,7 @@ export async function findOrCreateRootFolder(accessToken: string): Promise<strin
     method: 'POST',
     headers: authHeaders(accessToken),
     body: JSON.stringify({ name: 'ReliefTrack MY', mimeType: 'application/vnd.google-apps.folder' }),
-  }).then((r) => r.json())
+  }).then(ensureOk)
   return created.id
 }
 
@@ -89,7 +97,7 @@ export async function findOrCreateYAFolder(accessToken: string, rootId: string, 
   const q = encodeURIComponent(`"${rootId}" in parents and name="YA ${taxYear}" and mimeType="application/vnd.google-apps.folder" and trashed=false`)
   const search = await fetch(`${DRIVE_API}/files?q=${q}&fields=files(id,name)`, {
     headers: authHeaders(accessToken),
-  }).then((r) => r.json())
+  }).then(ensureOk)
 
   if (search.files?.length) return search.files[0].id
 
@@ -97,7 +105,7 @@ export async function findOrCreateYAFolder(accessToken: string, rootId: string, 
     method: 'POST',
     headers: authHeaders(accessToken),
     body: JSON.stringify({ name: `YA ${taxYear}`, mimeType: 'application/vnd.google-apps.folder', parents: [rootId] }),
-  }).then((r) => r.json())
+  }).then(ensureOk)
   return created.id
 }
 
@@ -116,7 +124,7 @@ export async function setupDriveFolderStructure(
   const rootManSearch = await fetch(
     `${DRIVE_API}/files?q=${encodeURIComponent(`"${rootId}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`,
     { headers: authHeaders(accessToken) }
-  ).then((r) => r.json())
+  ).then(ensureOk)
   if (!rootManSearch.files?.length) {
     await createMultipart(accessToken, rootId, { version: '1.0', updatedAt: new Date().toISOString() })
   }
@@ -125,7 +133,7 @@ export async function setupDriveFolderStructure(
   const yaManSearch = await fetch(
     `${DRIVE_API}/files?q=${encodeURIComponent(`"${yaId}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`,
     { headers: authHeaders(accessToken) }
-  ).then((r) => r.json())
+  ).then(ensureOk)
   if (!yaManSearch.files?.length) {
     await createMultipart(accessToken, yaId, { version: '1.0', updatedAt: new Date().toISOString(), year: taxYear })
   }
@@ -137,7 +145,7 @@ export async function setupDriveFolderStructure(
     const catSearch = await fetch(
       `${DRIVE_API}/files?q=${encodeURIComponent(`"${yaId}" in parents and name="${folderName}" and mimeType="application/vnd.google-apps.folder" and trashed=false`)}&fields=files(id,name)`,
       { headers: authHeaders(accessToken) }
-    ).then((r) => r.json())
+    ).then(ensureOk)
 
     let catFolderId: string
     if (catSearch.files?.length) {
@@ -147,7 +155,7 @@ export async function setupDriveFolderStructure(
         method: 'POST',
         headers: authHeaders(accessToken),
         body: JSON.stringify({ name: folderName, mimeType: 'application/vnd.google-apps.folder', parents: [yaId] }),
-      }).then((r) => r.json())
+      }).then(ensureOk)
       catFolderId = created.id
     }
     categoryFolderIds[catId] = catFolderId
@@ -155,7 +163,7 @@ export async function setupDriveFolderStructure(
     const manSearch = await fetch(
       `${DRIVE_API}/files?q=${encodeURIComponent(`"${catFolderId}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`,
       { headers: authHeaders(accessToken) }
-    ).then((r) => r.json())
+    ).then(ensureOk)
     if (!manSearch.files?.length) {
       await createMultipart(accessToken, catFolderId, { version: '1.0', updatedAt: new Date().toISOString(), records: [] })
     }
@@ -174,7 +182,7 @@ export async function loadAllDriveRecords(accessToken: string): Promise<{ folder
   const catRes = await fetch(
     `${DRIVE_API}/files?q=${encodeURIComponent(`"${yaId}" in parents and mimeType="application/vnd.google-apps.folder" and trashed=false`)}&fields=files(id,name)`,
     { headers: authHeaders(accessToken) }
-  ).then((r) => r.json())
+  ).then(ensureOk)
   const categoryFolders = catRes.files || []
 
   const manifestFileIds: Record<string, string> = {}
@@ -185,7 +193,7 @@ export async function loadAllDriveRecords(accessToken: string): Promise<{ folder
     const manifestRes = await fetch(
       `${DRIVE_API}/files?q=${encodeURIComponent(`"${catFolder.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`,
       { headers: authHeaders(accessToken) }
-    ).then((r) => r.json())
+    ).then(ensureOk)
     const manifestFile = manifestRes.files?.[0]
     if (!manifestFile) continue
 
@@ -200,7 +208,9 @@ export async function loadAllDriveRecords(accessToken: string): Promise<{ folder
           allRecords.push({ ...rec, _category: catFolder.name })
         }
       }
-    } catch {}
+    } catch (err) {
+      console.warn(`[google-drive] Failed to parse manifest for folder "${catFolder.name}":`, err)
+    }
   }
 
   return {
@@ -219,7 +229,7 @@ export async function saveCategoryManifest(
   const search = await fetch(
     `${DRIVE_API}/files?q=${encodeURIComponent(`"${categoryFolderId}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`,
     { headers: authHeaders(accessToken) }
-  ).then((r) => r.json())
+  ).then(ensureOk)
 
   const manifest = { version: '1.0', updatedAt: new Date().toISOString(), records }
 
