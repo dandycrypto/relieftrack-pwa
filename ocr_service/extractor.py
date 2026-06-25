@@ -72,80 +72,102 @@ def parse_amount_value(s: str) -> Optional[float]:
     return None
 
 
-def extract_amount(lines: list, full_text: str = "") -> Optional[float]:
-    """Find total amount using priority scoring.
 
-    Scoring:
-      +50 if line contains a TOTAL_SYNONYMS keyword
-      +20 if zone is "totals"
-      +5  if zone is "items"
-      -10 if zone is "footer"
-      -100 if line contains an EXCLUDE word (cash, change, balance returned)
-      -30 if line contains TAX or SERVICE_CHARGE keyword (those are sub-amounts)
-      Rightmost number in a line wins (usually the amount after the label)
-    """
-    candidates = []  # (amount, score, zone, text)
-
-    for ln in lines:
-        text = ln["text"]
-        zone = ln.get("zone", "")
-        text_lower = text.lower()
-
-        # Hard reject excluded lines
-        if any(w in text_lower for w in EXCLUDE_LOWER):
-            continue
-
-        # Find amounts in line
-        matches = list(AMOUNT_RE.finditer(text))
-        if not matches:
-            continue
-
-        # Score base
-        score = 0.0
-        for syn in TOTAL_SYNONYMS_LOWER:
-            if syn in text_lower:
-                score += 50
-                break
-
-        # Zone weighting
-        if zone == "totals":
-            score += 20
-        elif zone == "items":
-            score += 5
-        elif zone == "footer":
-            score -= 10
-
-        # Penalize tax/SC lines
-        is_tax_or_sc = False
-        for syn in TAX_SST_LOWER + TAX_GST_LOWER + SERVICE_CHARGE_LOWER:
-            if syn in text_lower:
-                score -= 30
-                is_tax_or_sc = True
-                break
-
-        # Pick rightmost amount (typically the value, not date or invoice)
-        m = matches[-1]
-        val = parse_amount_value(m.group(1))
-        if val is None:
-            continue
-
-        # Skip if amount appears inside a date context
+def _amounts_in_line(text: str) -> list:
+    """Return all non-date-context amounts in a line, rightmost first."""
+    matches = list(AMOUNT_RE.finditer(text))
+    results = []
+    for m in reversed(matches):
         ctx = text[max(0, m.start() - 12):m.start() + 12]
         if re.search(r'\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}', ctx):
             continue
+        val = parse_amount_value(m.group(1))
+        if val is not None:
+            results.append(val)
+    return results
 
-        candidates.append((val, score, zone, text))
 
-    if not candidates:
-        # Fallback: search entire text for the largest amount
-        all_amounts = [parse_amount_value(m.group(1)) for m in AMOUNT_RE.finditer(full_text)]
-        all_amounts = [a for a in all_amounts if a is not None and 0.50 <= a <= 50000]
-        if all_amounts:
-            return max(all_amounts)
-        return None
+def extract_amount(lines: list, full_text: str = "") -> Optional[float]:
+    """Find total amount — zone-first + adjacency-aware fallback.
 
-    candidates.sort(key=lambda x: (-x[1], -x[0]))
-    return candidates[0][0]
+    Priority:
+      1. In totals-zone: lines with TOTAL_SYNONYMS → rightmost number
+      2. Fallback: scan all lines for amounts. A line with only an amount
+         (no TOTAL keyword) is accepted only if the nearest preceding TOTAL
+         keyword (within 2 lines) is NOT separated by an EXCLUDE keyword.
+         Skip lines whose own text contains EXCLUDE keywords.
+      3. Sanity cap: 0 < amount < 50000
+    """
+    if not lines:
+        all_amounts = [parse_amount_value(m.group(1))
+                       for m in AMOUNT_RE.finditer(full_text or "")]
+        valid = [a for a in all_amounts if a is not None and 0 < a < 50000]
+        return max(valid) if valid else None
+
+    # ── Step 1: totals zone + TOTAL_SYNONYMS → rightmost number ──────────
+    for ln in lines:
+        if ln.get("zone", "") != "totals":
+            continue
+        text = ln["text"]
+        text_lower = text.lower()
+        if not any(syn in text_lower for syn in TOTAL_SYNONYMS_LOWER):
+            continue
+        if any(ex in text_lower for ex in EXCLUDE_LOWER):
+            continue
+        amounts = _amounts_in_line(text)
+        for val in amounts:
+            if 0 < val < 50000:
+                return val
+
+    # ── Step 2: fallback — scan all lines; handle split TOTAL/amount lines ─
+    # Build a set: indices of lines that contain a TOTAL keyword
+    total_kw_indices = set()
+    for i, ln in enumerate(lines):
+        if any(syn in ln["text"].lower() for syn in TOTAL_SYNONYMS_LOWER):
+            total_kw_indices.add(i)
+
+    candidates = []
+    for i, ln in enumerate(lines):
+        text_lower = ln["text"].lower()
+        # Skip lines with EXCLUDE keywords on the same line
+        if any(ex in text_lower for ex in EXCLUDE_LOWER):
+            continue
+        amounts = _amounts_in_line(ln["text"])
+        if not amounts:
+            continue
+
+        # Does this line have a TOTAL keyword?
+        has_total = any(syn in text_lower for syn in TOTAL_SYNONYMS_LOWER)
+        if has_total:
+            # Same-line TOTAL + amount → accept (CASH/CHANGE already excluded above)
+            for val in amounts:
+                if 0 < val < 50000:
+                    candidates.append(val)
+        else:
+            # Amount-only line (e.g. "RM45.90" on its own, separate from TOTAL keyword).
+            # Accept it only if the nearest preceding TOTAL keyword (within 2 lines
+            # above) is NOT separated from this amount by an EXCLUDE line.
+            nearest_total = None
+            for j in range(i - 1, max(i - 3, -1), -1):
+                if j in total_kw_indices:
+                    nearest_total = j
+                    break
+
+            if nearest_total is not None:
+                intervening_excluded = any(
+                    any(ex in lines[k]["text"].lower() for ex in EXCLUDE_LOWER)
+                    for k in range(nearest_total + 1, i)
+                )
+                if not intervening_excluded:
+                    for val in amounts:
+                        if 0 < val < 50000:
+                            candidates.append(val)
+            # else: standalone amount with no nearby TOTAL → skip
+
+    if candidates:
+        return max(candidates)
+
+    return None
 
 
 def extract_tax_amount(lines: list) -> tuple[Optional[float], Optional[str]]:
