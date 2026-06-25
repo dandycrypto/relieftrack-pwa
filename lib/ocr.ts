@@ -267,19 +267,40 @@ function extractAmount(text: string): number | null {
     } catch {}
   }
 
-  // Fallback: look for amounts near transaction keywords
-  const TXN_KW = ["total","credit","cash","payment","payable","sales","amount","due","rounding","change","rm ","sgd","usd","balance","nett","net","charge","fee"]
-  const txnPos: number[] = []
-  TXN_KW.forEach(kw => {
-    let match
-    const regex = new RegExp(kw, 'gi')
-    while ((match = regex.exec(text)) !== null) {
-      txnPos.push(match.index)
-    }
-  })
+  // Fallback: look for amounts near transaction keywords with priority weights
+  // Priority: GRAND TOTAL > TOTAL > NETT/NET > AMOUNT DUE/PAYABLE > SUBTOTAL > SALES > CHARGE/FEE > BALANCE > CASH > CHANGE
+  // (CASH/CHANGE are often LARGER than the actual total, so we don't pick by max value)
+  const KW_WEIGHTS: Array<[string, number]> = [
+    [/\bgrand\s*total\b/i, 100],
+    [/\btotal\s*including\s*tax\b/i, 95],
+    [/\btotal\s*billed\b/i, 90],
+    [/\bamount\s*due\b/i, 85],
+    [/\bpayable\b/i, 80],
+    [/\bamount\s*payable\b/i, 80],
+    [/\btotal\b/i, 75],
+    [/\bnett?\b/i, 70],
+    [/\bsubtotal\b/i, 50],
+    [/\bsales\b/i, 45],
+    [/\bcharge\b/i, 40],
+    [/\bfee\b/i, 35],
+    [/\brounding\b/i, 30],
+    [/\bbayar\b/i, 65],          // Malay: amount to pay
+    [/\bjumlah\b/i, 70],         // Malay: total
+    [/\bbil\b/i, 60],            // Malay: bill
+    [/\bresit\b/i, 25],          // Malay: receipt (low priority)
+    [/\bbalance\b/i, 20],
+    [/\bcredit\b/i, 15],
+    [/\bpayment\b/i, 15],
+    [/\bcash\b/i, 10],           // CASH tendered is usually >= TOTAL but not the total itself
+    [/\btendered\b/i, 10],
+    [/\bchange\b/i, 5],          // CHANGE is always leftover, lowest
+    [/\bbaki\b/i, 5],            // Malay: balance/change
+    [/\btunai\b/i, 10],          // Malay: cash
+    [/\bRM\s/i, 8],              // generic RM prefix
+  ]
 
-  // Find all candidate amounts (numbers that look like money, not dates)
-  const candidates: number[] = []
+  interface Cand { val: number; weight: number; line: string }
+  const candidates: Cand[] = []
   const amountRegex = /(?<![.\d])(\d{1,4}[,.]?\d{0,2}[,.]?\d{2})(?![.\d])/g
   while ((m = amountRegex.exec(text)) !== null) {
     try {
@@ -288,17 +309,28 @@ function extractAmount(text: string): number | null {
       // Skip amounts part of a date context
       const ctx = text.slice(Math.max(0, m.index - 10), m.index + 10)
       if (/\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}/.test(ctx)) continue
-      // Check proximity to transaction keywords
+      // Get the full line containing this amount
       const lineStart = text.lastIndexOf('\n', m.index) + 1
       const lineEnd = text.indexOf('\n', m.index)
       const line = text.slice(lineStart, lineEnd === -1 ? m.index + 30 : lineEnd).toLowerCase()
-      if (TXN_KW.some(kw => line.includes(kw))) {
-        candidates.push(val)
+      // Find best matching keyword weight
+      let bestWeight = 0
+      for (const [pattern, weight] of KW_WEIGHTS) {
+        if (pattern.test(line)) {
+          if (weight > bestWeight) bestWeight = weight
+        }
+      }
+      if (bestWeight > 0) {
+        candidates.push({ val, weight: bestWeight, line })
       }
     } catch {}
   }
 
-  if (candidates.length > 0) return Math.max(...candidates)
+  if (candidates.length > 0) {
+    // Pick highest-weight candidate; tiebreak by larger amount (prefer total over subtotal)
+    candidates.sort((a, b) => b.weight - a.weight || b.val - a.val)
+    return candidates[0].val
+  }
 
   return null
 }
@@ -375,7 +407,7 @@ function extractVendor(text: string): string {
             }
             if (skip) continue
             const cleaned = cand.replace(/[^\w\s\-&()/.]/g, ' ').trim()
-            if (cleaned.length > 3) return cleaned.slice(0, 80)
+            if (cleaned.length >= 2) return cleaned.slice(0, 80)
           }
         } else if (nextLine && !/\b(selangor|kuala lumpur|shah alam|sungei|sungai buloh|petaling|pj|cyberjaya|putrajaya|johor bahru|penang|melaka|ipoh|kedah|kelantan|terengganu|pahang|perak|sarawak|sabah|malaysia|40160|47000|50000)\b/i.test(nextLine) && !/^[A-Z][A-Z\s]{3,30},$/.test(nextLine)) {
           let skip = false
@@ -411,7 +443,7 @@ function extractVendor(text: string): string {
         }
         if (!skip) {
           const cleaned = cand.replace(/[^\w\s\-&()/.]/g, ' ').trim()
-          if (cleaned.length > 3) return cleaned.slice(0, 80)
+          if (cleaned.length >= 2) return cleaned.slice(0, 80)
         }
       }
       break
@@ -435,7 +467,7 @@ function extractVendor(text: string): string {
     if (skip) continue
 
     const cleaned = line.replace(/[^\w\s\-&()/.]/g, ' ').trim()
-    if (cleaned.length > 3) {
+    if (cleaned.length >= 2) {
       return cleaned.slice(0, 80)
     }
   }
@@ -492,6 +524,22 @@ function suggestCategory(text: string): string {
 
   for (const [cat, kws] of Object.entries(CATEGORY_KEYWORDS)) {
     scores[cat] = kws.filter(kw => textLower.includes(kw)).length
+  }
+
+  // Vendor-specific overrides (high confidence based on well-known names)
+  // These take priority over keyword scoring
+  const vendorPriority: Array<[RegExp, string]> = [
+    [/guardian|caring\s*pharmacy|watsons|alpro\s*pharmacy|big\s*pharmacy/i, "medical_self"],
+    [/^\s*tm\s|unifi|maxis\s|celcom\s|digi\s|time\.com/i, "utilities"],
+    [/^\s*syabas\s|air\s*selangor|tenaga\s*nasional|tnb\s/i, "utilities"],
+    [/^\s*aia\s|prudential|great\s*eastern|takaful\s/i, "insurance"],
+    [/shell\s|petronas\s|caltex\s|bhp\s/i, "transport"],
+    [/starbucks|mcdonald|kfc\s|pizza\s*hut|texas\s*chicken|tealive|chatime/i, "lifestyle"], // food
+  ]
+  for (const [pattern, category] of vendorPriority) {
+    if (pattern.test(text)) {
+      return category
+    }
   }
 
   const maxCat = Object.entries(scores).sort(([,a], [,b]) => b - a)[0]
