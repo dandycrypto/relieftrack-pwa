@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import fs from 'fs'
 
-const PROFILE_FILE = '/tmp/relieftack-profile.json'
+const PROFILE_DIR = '/tmp/relieftrack-profiles'
+
+function profilePath(userId: string): string {
+  // Sanitize userId to prevent path traversal
+  const safe = userId.replace(/[^a-zA-Z0-9_-]/g, '')
+  if (!safe) throw new Error('Invalid user id')
+  return `${PROFILE_DIR}/${safe}.json`
+}
 
 // ── Auth helper (mirrors /api/drive pattern) ─────────────────────────────────
 async function requireAuth(request: NextRequest) {
@@ -40,7 +47,10 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    fs.writeFileSync(PROFILE_FILE, JSON.stringify(profile, null, 2), 'utf-8')
+    if (!fs.existsSync(PROFILE_DIR)) {
+      fs.mkdirSync(PROFILE_DIR, { recursive: true })
+    }
+    fs.writeFileSync(profilePath(user.id), JSON.stringify(profile, null, 2), 'utf-8')
 
     return NextResponse.json({ success: true })
   } catch (err: unknown) {

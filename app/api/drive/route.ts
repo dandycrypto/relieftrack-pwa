@@ -420,7 +420,7 @@ export async function POST(request: NextRequest) {
         updatedAt: new Date().toISOString(),
         records,
       })
-      console.log('[Drive POST] saveRecord success:', record.id, record.category)
+      // success: saveRecord
     } else if (action === 'updateRecord' && record) {
       affectedCategory = record.category
       affectedFileId = manifestFileIds[affectedCategory]
@@ -436,7 +436,7 @@ export async function POST(request: NextRequest) {
         updatedAt: new Date().toISOString(),
         records,
       })
-      console.log('[Drive POST] updateRecord success:', record.id)
+      // success: updateRecord
     } else if (action === 'deleteRecord' && recordId) {
       const categories = Object.keys(categoryFolderIds)
       for (const cat of categories) {
@@ -454,7 +454,7 @@ export async function POST(request: NextRequest) {
             updatedAt: new Date().toISOString(),
             records,
           })
-          console.log('[Drive POST] deleteRecord success:', recordId)
+          // success: deleteRecord
           break
         }
       }
