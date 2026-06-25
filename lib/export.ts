@@ -43,7 +43,7 @@ export function exportRecordsPDF(
   records: Record[],
   profile: Profile,
   categories: ReliefCategory[],
-  totals: Record<string, number>,
+  totals: { [k: string]: number },
   totalClaimed: number,
   totalPossible: number
 ): void {
@@ -235,7 +235,7 @@ export function exportRecordsPDF(
 
 // ─── LHDN BE Form Reference Export ──────────────────────────────────────────
 
-const LHDN_CODES: Record<string, string> = {
+const LHDN_CODES: { [k: string]: string } = {
   individual: 'D1',
   medical_self: 'D7',
   parents_medical: 'D6',
@@ -300,6 +300,131 @@ export function exportLHDNReference(
     new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' }),
     `lhdn-reference-ya${taxYear}-${new Date().toISOString().split('T')[0]}.csv`
   )
+}
+
+// ─── BE Worksheet — MyTax Hand-Off ──────────────────────────────────────────
+// Outputs values in exact BE form field order for direct transcription into MyTax / e-Filing
+
+interface BEField {
+  code: string
+  label: string
+  catId: string | null  // null = computed
+  note?: string
+}
+
+// BE form Section D fields in official order
+const BE_FIELDS: BEField[] = [
+  { code: 'D1',  label: 'Individual & dependent relatives',   catId: 'individual' },
+  { code: 'D2',  label: 'Disabled individual (self)',         catId: 'disabled' },
+  { code: 'D3',  label: 'Education fees (own)',               catId: 'education_self', note: 'D11 in older forms' },
+  { code: 'D4',  label: 'Purchase of supporting equipment',   catId: 'disabled_equipment' },
+  { code: 'D5',  label: 'Medical expenses (serious diseases)', catId: null, note: 'Part of D7 medical_self' },
+  { code: 'D6',  label: 'Medical expenses for parents',       catId: 'parents_medical' },
+  { code: 'D7',  label: 'Medical / dental / child-care fees', catId: 'medical_self' },
+  { code: 'D8',  label: 'Husband / wife / alimony',          catId: 'spouse' },
+  { code: 'D9',  label: 'Child < 18 years (per child)',       catId: 'children_under18' },
+  { code: 'D10', label: 'Child (higher education)',           catId: 'children_education' },
+  { code: 'D11', label: 'Education fees — self (upskilling)', catId: 'education_self', note: 'Alias for D3 in YA2024+' },
+  { code: 'D12', label: 'Life insurance / EPF',               catId: 'epf_insurance' },
+  { code: 'D13', label: 'Private retirement scheme (PRS)',    catId: 'private_pension' },
+  { code: 'D14', label: 'Lifestyle (books/PC/internet/sports)', catId: 'lifestyle' },
+  { code: 'D15', label: 'SOCSO / EIS',                        catId: 'socso' },
+  { code: 'D16', label: 'Housing loan interest',              catId: 'housing_loan' },
+  { code: 'E2',  label: 'Zakat / fitrah',                     catId: 'zakat' },
+]
+
+export function downloadBEWorksheet(
+  profile: Profile,
+  reliefTotals: { [catId: string]: number },
+  taxSummary: {
+    grossIncome: number
+    epf: number
+    socso: number
+    pcb: number
+    chargeableIncome: number
+    estimatedTax: number
+    taxAfterRebate: number
+    balance: number
+  },
+  taxYear: string
+): void {
+  const ya = `YA ${taxYear}`
+  const now = new Date().toLocaleDateString('en-MY')
+
+  const fieldRows = BE_FIELDS.map((f) => {
+    const amount = f.catId ? (reliefTotals[f.catId] ?? 0) : 0
+    const highlight = amount > 0 ? 'background:#f0fdf4;font-weight:600;color:#166534' : 'color:#9ca3af'
+    return `
+      <tr>
+        <td style="padding:6px 10px;border:1px solid #e5e7eb;font-family:monospace;font-size:12px;font-weight:700;color:#059669">${f.code}</td>
+        <td style="padding:6px 10px;border:1px solid #e5e7eb;font-size:13px">${f.label}${f.note ? ` <span style="font-size:10px;color:#9ca3af">(${f.note})</span>` : ''}</td>
+        <td style="padding:6px 10px;border:1px solid #e5e7eb;text-align:right;${highlight}">${amount > 0 ? `RM ${amount.toFixed(2)}` : '—'}</td>
+      </tr>`
+  }).join('')
+
+  const totalRelief = Object.values(reliefTotals).reduce((s, v) => s + v, 0)
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>e-BE Worksheet ${ya} — ${profile.name}</title>
+<style>
+  body{font-family:Arial,sans-serif;max-width:720px;margin:32px auto;color:#111;padding:0 16px}
+  h1{font-size:20px;color:#059669;margin-bottom:2px}
+  .subtitle{font-size:13px;color:#6b7280;margin-bottom:24px}
+  table{width:100%;border-collapse:collapse;margin-bottom:24px}
+  th{background:#059669;color:#fff;padding:8px 10px;font-size:12px;text-align:left}
+  .section-header{background:#f3f4f6;padding:8px 10px;font-weight:700;font-size:13px;border:1px solid #e5e7eb}
+  .disclaimer{background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:12px;font-size:12px;color:#92400e;margin-top:24px}
+  @media print{body{margin:0}.disclaimer{border-color:#ddd}}
+</style>
+</head>
+<body>
+<h1>e-BE Pre-Fill Worksheet</h1>
+<p class="subtitle">${ya} &nbsp;|&nbsp; ${profile.name} &nbsp;|&nbsp; Generated ${now} via ReliefTrack MY</p>
+
+<table>
+  <tr><th colspan="3">SECTION B — STATUTORY INCOME</th></tr>
+  <tr><td style="padding:6px 10px;border:1px solid #e5e7eb">B1 — Gross Employment Income</td><td></td><td style="padding:6px 10px;border:1px solid #e5e7eb;text-align:right;font-weight:600">RM ${taxSummary.grossIncome.toFixed(2)}</td></tr>
+  <tr><td style="padding:6px 10px;border:1px solid #e5e7eb">EPF Contribution (Employer + Employee, capped RM4,000)</td><td></td><td style="padding:6px 10px;border:1px solid #e5e7eb;text-align:right">RM ${taxSummary.epf.toFixed(2)}</td></tr>
+</table>
+
+<table>
+  <tr><th colspan="3">SECTION D — PERSONAL RELIEFS (copy values into MyTax/e-Filing)</th></tr>
+  ${fieldRows}
+  <tr>
+    <td colspan="2" style="padding:8px 10px;border:1px solid #e5e7eb;font-weight:700;background:#f9fafb">TOTAL RELIEF (D1–E2)</td>
+    <td style="padding:8px 10px;border:1px solid #e5e7eb;text-align:right;font-weight:700;color:#059669">RM ${totalRelief.toFixed(2)}</td>
+  </tr>
+</table>
+
+<table>
+  <tr><th colspan="2">SECTION E — TAX COMPUTATION (estimated)</th></tr>
+  <tr><td style="padding:6px 10px;border:1px solid #e5e7eb">Chargeable Income</td><td style="padding:6px 10px;border:1px solid #e5e7eb;text-align:right;font-weight:600">RM ${taxSummary.chargeableIncome.toFixed(2)}</td></tr>
+  <tr><td style="padding:6px 10px;border:1px solid #e5e7eb">Estimated Tax Payable</td><td style="padding:6px 10px;border:1px solid #e5e7eb;text-align:right">RM ${taxSummary.estimatedTax.toFixed(2)}</td></tr>
+  <tr><td style="padding:6px 10px;border:1px solid #e5e7eb">Tax After Rebate</td><td style="padding:6px 10px;border:1px solid #e5e7eb;text-align:right;font-weight:600">RM ${taxSummary.taxAfterRebate.toFixed(2)}</td></tr>
+  <tr><td style="padding:6px 10px;border:1px solid #e5e7eb">PCB / Monthly Tax Deduction Paid</td><td style="padding:6px 10px;border:1px solid #e5e7eb;text-align:right">RM ${taxSummary.pcb.toFixed(2)}</td></tr>
+  <tr><td style="padding:8px 10px;border:1px solid #e5e7eb;font-weight:700;background:#${taxSummary.balance > 0 ? 'fef2f2' : 'f0fdf4'}">
+    ${taxSummary.balance > 0 ? 'Balance Payable (tax owed)' : 'Tax Refund Due'}</td>
+    <td style="padding:8px 10px;border:1px solid #e5e7eb;text-align:right;font-weight:700;color:#${taxSummary.balance > 0 ? 'dc2626' : '059669'}">
+    RM ${Math.abs(taxSummary.balance).toFixed(2)}</td>
+  </tr>
+</table>
+
+<div class="disclaimer">
+  ⚠️ <strong>For personal reference only.</strong> This is not an official LHDN document.
+  Verify all figures against your EA Form and official receipts before submitting to MyTax/e-Filing.
+  Relief limits and eligibility are subject to LHDN approval.
+</div>
+</body>
+</html>`
+
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  // Open in new tab so user can print
+  window.open(url, '_blank')
+  setTimeout(() => URL.revokeObjectURL(url), 30000)
 }
 
 // ─── Blob Download ──────────────────────────────────────────────────────────

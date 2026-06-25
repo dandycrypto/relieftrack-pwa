@@ -127,7 +127,7 @@ import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, calculateTax, calculat
 import { createSupabaseBrowserClient } from "@/utils/supabase/client"
 import { performOCR, type OcrResult } from "@/lib/ocr"
 import { verifyRecord, verifyEAForm, findDuplicates, type VerifyResult, type EAFormVerifyResult } from "@/lib/verify"
-import { exportRecordsCSV, exportRecordsPDF, exportLHDNReference } from "@/lib/export"
+import { exportRecordsCSV, exportRecordsPDF, exportLHDNReference, downloadBEWorksheet } from "@/lib/export"
 import { computeMaximiser } from "@/lib/relief-maximiser"
 import { runScenarios, getQuickScenarios } from "@/lib/scenario-planner"
 import { generateTaxReport } from "@/lib/tax-report"
@@ -990,6 +990,10 @@ useEffect(() => {
     merchant: '', amount: '', category: 'lifestyle', dayOfMonth: 1, description: '',
   })
 
+  // ── Natural-language quick capture ───────────────────────────────────────
+  const [nlpInput, setNlpInput] = useState('')
+  const [isNlpParsing, setIsNlpParsing] = useState(false)
+
   // ── Phase 3 feature state ─────────────────────────────────────────────────
   const [showTaxAssistant, setShowTaxAssistant] = useState(false)
   const [showYearComparison, setShowYearComparison] = useState(false)
@@ -1534,6 +1538,75 @@ useEffect(() => {
     }
   }
 
+  const handleBEWorksheet = () => {
+    try {
+      const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+      const eaData = settings.eaFormByYear?.[taxYear]
+      const grossIncome = eaData?.grossIncome ?? profile.grossIncome ?? 0
+      const epf = Math.min(eaData?.epf ?? 0, 4000)
+      const socso = Math.min(eaData?.socso ?? 0, 400)
+      const pcb = eaData?.pcb ?? 0
+      const chargeableIncome = Math.max(0, grossIncome - epf - 9000 - totalClaimed)
+      const taxResult = calculateTax(chargeableIncome)
+      downloadBEWorksheet(profile, reliefTotals, {
+        grossIncome, epf, socso, pcb,
+        chargeableIncome,
+        estimatedTax: taxResult.taxBeforeRebate,
+        taxAfterRebate: taxResult.taxAfterRebate,
+        balance: taxResult.taxAfterRebate - pcb,
+      }, String(taxYear))
+      toast.success("e-BE Worksheet opened in new tab — ready to print or copy into MyTax")
+    } catch {
+      toast.error("Failed to generate worksheet.")
+    }
+  }
+
+  const handleNlpCapture = async () => {
+    if (!nlpInput.trim() || isNlpParsing) return
+    setIsNlpParsing(true)
+    try {
+      const today = new Date().toISOString().slice(0, 10)
+      const catList = RELIEF_CATEGORIES.map(c => `${c.id}="${c.name}"`).join(', ')
+      const res = await fetch('/api/ai-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: nlpInput }],
+          context: { mode: 'parse_record', today, categories: catList },
+          parseMode: true,
+        }),
+      })
+      if (!res.ok) throw new Error('API error')
+      const data = await res.json()
+      // Expect: { date, merchant, amount, category, description }
+      const parsed = data.parsed ?? data
+      if (parsed.amount && parsed.merchant) {
+        setNewRecord({
+          date: parsed.date || today,
+          merchant: parsed.merchant,
+          amount: String(parsed.amount),
+          category: parsed.category || 'lifestyle',
+          description: parsed.description || nlpInput,
+          status: 'pending',
+          receiptUrl: '',
+          receiptFileName: '',
+          invoiceNumber: '',
+          taxAmount: '',
+          lhdNCategory: '',
+          recipient: 'self',
+          notes: `NLP: "${nlpInput}"`,
+        })
+        setNlpInput('')
+      } else {
+        toast.error("Couldn't parse — try: 'paid RM180 dental for mum on 15 Jan'")
+      }
+    } catch {
+      toast.error("AI parse failed — try manual entry")
+    } finally {
+      setIsNlpParsing(false)
+    }
+  }
+
   const getAuditTaxSummary = () => {
     const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
     const eaData = settings.eaFormByYear?.[taxYear]
@@ -1847,6 +1920,37 @@ useEffect(() => {
               </div>
             )}
           </div>
+
+          {/* Filing Checklist — personalised items */}
+          {(() => {
+            const yearRecs = displayRecords.filter(r => r.date.startsWith(String(selectedYear)))
+            const missingReceipts = yearRecs.filter(r => !r.receiptUrl && r.category !== 'individual').length
+            const hasEA = !!(settings.eaFormByYear?.[selectedYear]?.grossIncome)
+            const maxResult = computeMaximiser(displayProfile, settings, displayRecords, reliefTotals)
+            const capturable = Math.round(maxResult.potentialSaving)
+            const unclaimedCats = maxResult.opportunities.filter(o => o.claimed === 0).length
+            const items = [
+              !hasEA && { icon: '⚠️', text: 'Add your EA Form income', urgent: true },
+              missingReceipts > 0 && { icon: '📎', text: `${missingReceipts} receipt${missingReceipts > 1 ? 's' : ''} missing`, urgent: missingReceipts > 3 },
+              unclaimedCats > 0 && { icon: '💡', text: `${unclaimedCats} relief categor${unclaimedCats > 1 ? 'ies' : 'y'} not yet claimed`, urgent: false },
+              capturable > 0 && { icon: '💰', text: `RM ${capturable.toLocaleString()} more tax savings available`, urgent: false },
+            ].filter(Boolean) as { icon: string; text: string; urgent: boolean }[]
+            if (items.length === 0) return null
+            return (
+              <div className="rounded-xl border border-amber-200 bg-amber-50/60 dark:border-amber-900 dark:bg-amber-950/20 px-4 py-3 space-y-1.5">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <CalendarClock className="h-3.5 w-3.5 text-amber-600" />
+                  <span className="text-xs font-semibold text-amber-700 dark:text-amber-400">Filing Checklist — YA {selectedYear}</span>
+                </div>
+                {items.map((item, i) => (
+                  <div key={i} className="flex items-start gap-2 text-xs">
+                    <span>{item.icon}</span>
+                    <span className={item.urgent ? 'font-semibold text-amber-800 dark:text-amber-300' : 'text-amber-700 dark:text-amber-400'}>{item.text}</span>
+                  </div>
+                ))}
+              </div>
+            )
+          })()}
 
           {/* TaxSavingsHero — shows Net Tax Balance */}
           {(() => {
@@ -3360,6 +3464,13 @@ useEffect(() => {
               </Button>
               <Button
                 variant="outline"
+                className="h-11 w-full justify-start gap-3 border-violet-200 px-4 font-medium text-violet-700 transition-all hover:border-violet-300 hover:bg-violet-50 dark:border-violet-900 dark:text-violet-400 dark:hover:bg-violet-950/30"
+                onClick={handleBEWorksheet}
+              >
+                <ExternalLink className="h-4 w-4" /> e-BE Worksheet (MyTax ready)
+              </Button>
+              <Button
+                variant="outline"
                 className="h-11 w-full justify-start gap-3 border-emerald-200 px-4 font-medium text-emerald-700 transition-all hover:border-emerald-300 hover:bg-emerald-50 dark:border-emerald-900 dark:text-emerald-400 dark:hover:bg-emerald-950/30"
                 onClick={handleExportAuditExcel}
               >
@@ -4105,6 +4216,31 @@ useEffect(() => {
           {!isProcessing && !showOcrReview && !showOCRForm && !isVerifying && !showQrScanner && !showBulkQueue && !showEWalletImport && !showStatementImport ? (
             // Upload options
             <div className="space-y-4 p-4">
+              {/* Natural-language quick capture */}
+              <div className="relative">
+                <input
+                  type="text"
+                  value={nlpInput}
+                  onChange={(e) => setNlpInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleNlpCapture() }}
+                  placeholder='Try: "paid RM180 dental for mum" or "RM2400 laptop Shopee"'
+                  className="w-full rounded-xl border border-violet-200 bg-violet-50/60 px-4 py-3 pr-12 text-sm placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-violet-400 dark:border-violet-900 dark:bg-violet-950/20"
+                />
+                <button
+                  onClick={handleNlpCapture}
+                  disabled={!nlpInput.trim() || isNlpParsing}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-lg bg-violet-500 text-white disabled:opacity-40 hover:bg-violet-600 transition-colors"
+                >
+                  {isNlpParsing
+                    ? <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    : <Sparkles className="h-3.5 w-3.5" />
+                  }
+                </button>
+              </div>
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center"><span className="w-full border-t" /></div>
+                <div className="relative flex justify-center text-xs uppercase"><span className="bg-background px-2 text-muted-foreground">or upload</span></div>
+              </div>
               <Button
                 variant="outline"
                 className="h-24 w-full flex-col gap-2"

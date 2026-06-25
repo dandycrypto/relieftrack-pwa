@@ -77,20 +77,53 @@ Important rules:
 - Keep responses under 250 words unless a detailed breakdown is requested`
 }
 
+const PARSE_SYSTEM = `You are a Malaysian tax record parser. The user describes an expense in natural language. Extract: date (YYYY-MM-DD, default today if not given), merchant name, amount (number, RM), category (one of: individual, medical_self, parents_medical, education_self, lifestyle, epf_insurance, housing_loan, children_under18, children_education, disabled, disabled_equipment, spouse, private_pension, socso, zakat), description (brief).
+Reply ONLY with valid JSON, no markdown: {"date":"YYYY-MM-DD","merchant":"...","amount":0,"category":"...","description":"..."}
+Category hints: dental/medical/clinic → medical_self; mum/parents → parents_medical; books/laptop/internet/sports → lifestyle; insurance/EPF → epf_insurance; university/course → education_self; children → children_under18.`
+
 export async function POST(req: NextRequest) {
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) {
     return NextResponse.json({ error: 'AI assistant not configured' }, { status: 503 })
   }
 
-  let body: { messages: ChatMessage[]; context: TaxContext }
+  let body: { messages: ChatMessage[]; context: TaxContext; parseMode?: boolean }
   try {
     body = await req.json()
   } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  const { messages, context } = body
+  const { messages, context, parseMode } = body
+
+  // ── Parse mode: natural-language → structured record ──────────────────────
+  if (parseMode) {
+    const userText = messages?.[0]?.content || ''
+    const today = (context as unknown as Record<string, string>)?.today || new Date().toISOString().slice(0, 10)
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 200,
+          system: PARSE_SYSTEM,
+          messages: [{ role: 'user', content: `Today is ${today}. Parse: "${userText}"` }],
+        }),
+      })
+      if (!res.ok) return NextResponse.json({ error: 'AI error' }, { status: 502 })
+      const data = await res.json()
+      const text = (data.content?.[0]?.text || '').trim()
+      const match = text.match(/\{[\s\S]*\}/)
+      if (!match) return NextResponse.json({ error: 'Parse failed' }, { status: 422 })
+      const parsed = JSON.parse(match[0])
+      return NextResponse.json({ parsed })
+    } catch (err) {
+      console.error('NLP parse error:', err)
+      return NextResponse.json({ error: 'Parse error' }, { status: 500 })
+    }
+  }
+
   if (!messages?.length || !context) {
     return NextResponse.json({ error: 'Missing messages or context' }, { status: 400 })
   }
