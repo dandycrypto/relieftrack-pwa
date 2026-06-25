@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#059669"/>
+      <stop offset="100%" stop-color="#047857"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+  <!-- Receipt/Document -->
+  <rect x="140" y="120" width="232" height="300" rx="16" fill="white" opacity="0.95"/>
+  <rect x="168" y="160" width="120" height="12" rx="6" fill="#059669"/>
+  <rect x="168" y="188" width="176" height="8" rx="4" fill="#d1d5db"/>
+  <rect x="168" y="208" width="160" height="8" rx="4" fill="#d1d5db"/>
+  <rect x="168" y="228" width="140" height="8" rx="4" fill="#d1d5db"/>
+  <!-- Checkmark circle -->
+  <circle cx="310" cy="340" r="52" fill="#059669"/>
+  <polyline points="280,340 300,360 340,320" stroke="white" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>

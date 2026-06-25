@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 14">
+  <!-- 14 stripes: red, white alternating from top -->
+  <rect width="28" height="1" fill="#CC0001"/>
+  <rect y="1" width="28" height="1" fill="#FFFFFF"/>
+  <rect y="2" width="28" height="1" fill="#CC0001"/>
+  <rect y="3" width="28" height="1" fill="#FFFFFF"/>
+  <rect y="4" width="28" height="1" fill="#CC0001"/>
+  <rect y="5" width="28" height="1" fill="#FFFFFF"/>
+  <rect y="6" width="28" height="1" fill="#CC0001"/>
+  <rect y="7" width="28" height="1" fill="#FFFFFF"/>
+  <rect y="8" width="28" height="1" fill="#CC0001"/>
+  <rect y="9" width="28" height="1" fill="#FFFFFF"/>
+  <rect y="10" width="28" height="1" fill="#CC0001"/>
+  <rect y="11" width="28" height="1" fill="#FFFFFF"/>
+  <rect y="12" width="28" height="1" fill="#CC0001"/>
+  <rect y="13" width="28" height="1" fill="#FFFFFF"/>
+  <!-- Blue canton: top-left 14x7 -->
+  <rect width="14" height="7" fill="#010066"/>
+  <!-- 14-point star centered at (7, 3.5), outer radius 3, inner radius 1.9 -->
+  <polygon fill="#FFCC00" points="
+    7.00,0.50 7.45,1.55 8.30,0.80 8.25,1.94 9.35,1.63 8.80,2.63 9.92,2.83 9.00,3.50 9.92,4.17 8.80,4.37 9.35,5.37 8.25,5.06 8.30,6.20 7.45,5.45 7.00,6.50 6.55,5.45 5.70,6.20 5.75,5.06 4.65,5.37 5.20,4.37 4.08,4.17 5.00,3.50 4.08,2.83 5.20,2.63 4.65,1.63 5.75,1.94 5.70,0.80 6.55,1.55
+  "/>
+  <!-- Crescent: outer circle radius 2, inner cut  -->
+  <path fill="#FFCC00" d="M 11.5,1.5 A 2.5,2.5 0 1,1 7.5,5.8 A 2,2 0 1,0 11.5,1.5 Z"/>
+</svg>
