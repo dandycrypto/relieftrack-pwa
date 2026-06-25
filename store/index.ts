@@ -61,6 +61,17 @@ export interface Record {
   rawText?: string // original OCR text for re-verification on edit
 }
 
+export interface RecurringTemplate {
+  id: string
+  merchant: string
+  amount: number
+  category: string
+  dayOfMonth: number    // 1–28
+  description?: string
+  active: boolean
+  lastFiredMonth?: string  // 'YYYY-MM' to avoid double-firing
+}
+
 export interface Profile {
   name: string
   maritalStatus: MaritalStatus
@@ -92,6 +103,8 @@ export interface Settings {
   themePreference: ThemePreference
   defaultTaxYear: TaxYear
   onboardingComplete: boolean
+  supabaseUserId: string | null
+  emailForwardingAddress: string
   // EA Form data per Year of Assessment (set when user confirms EA Form)
   eaFormByYear?: Record<number, {
     confirmed: boolean
@@ -282,6 +295,8 @@ export const INITIAL_SETTINGS: Settings = {
   themePreference: 'system',
   defaultTaxYear: String(new Date().getFullYear()),
   onboardingComplete: false,
+  supabaseUserId: null,
+  emailForwardingAddress: '',
   eaFormByYear: {},
 }
 
@@ -317,10 +332,11 @@ interface ReliefStore {
   records: Record[]
   profile: Profile
   settings: Settings
+  recurringTemplates: RecurringTemplate[]
   isHydrated: boolean
 
-  // Record Actions
-  addRecord: (record: Omit<Record, 'id'>) => void
+  // Record Actions — id is optional; caller can pre-generate for sync purposes
+  addRecord: (record: Omit<Record, 'id'> & { id?: string }) => string
   updateRecord: (id: string, updates: Partial<Record>) => void
   deleteRecord: (id: string) => void
   deleteAllRecords: () => void
@@ -331,6 +347,12 @@ interface ReliefStore {
 
   // Settings Actions
   updateSettings: (updates: Partial<Settings>) => void
+
+  // Recurring Template Actions
+  addTemplate: (t: Omit<RecurringTemplate, 'id'>) => void
+  updateTemplate: (id: string, updates: Partial<RecurringTemplate>) => void
+  deleteTemplate: (id: string) => void
+  fireTemplates: () => string[]  // fires due templates; returns list of merchant names
 
   // Computed helpers (called from components)
   getReliefTotals: () => Record<string, number>
@@ -351,6 +373,7 @@ export const useReliefStore = create<ReliefStore>()(
       records: [], // New users start with blank records; DEMO_RECORDS loaded only via ?demo=true
       profile: INITIAL_PROFILE,
       settings: INITIAL_SETTINGS,
+      recurringTemplates: [],
       isHydrated: false,
 
       setHydrated: (val) => set({ isHydrated: val }),
@@ -358,10 +381,11 @@ export const useReliefStore = create<ReliefStore>()(
       // ── Record Actions (real records only — demo records use separate store) ─
 
       addRecord: (record) => {
-        const newId = `rec-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+        const newId = record.id || `rec-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
         set((state) => ({
           records: [{ ...record, id: newId, syncedToDrive: false }, ...state.records],
         }))
+        return newId
       },
 
       updateRecord: (id, updates) => {
@@ -377,6 +401,59 @@ export const useReliefStore = create<ReliefStore>()(
       },
 
       deleteAllRecords: () => set({ records: [] }),
+
+      // ── Recurring Template Actions ─────────────────────────────────────────
+
+      addTemplate: (t) => {
+        const id = `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+        set((state) => ({
+          recurringTemplates: [...state.recurringTemplates, { ...t, id }],
+        }))
+      },
+
+      updateTemplate: (id, updates) => {
+        set((state) => ({
+          recurringTemplates: state.recurringTemplates.map((t) => t.id === id ? { ...t, ...updates } : t),
+        }))
+      },
+
+      deleteTemplate: (id) => {
+        set((state) => ({
+          recurringTemplates: state.recurringTemplates.filter((t) => t.id !== id),
+        }))
+      },
+
+      fireTemplates: () => {
+        const { recurringTemplates, addRecord } = get()
+        const now = new Date()
+        const currentYearMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+        const today = now.getDate()
+        const firedIds = new Set<string>()
+        const firedMerchants: string[] = []
+        recurringTemplates.forEach((t) => {
+          if (!t.active) return
+          if (t.lastFiredMonth === currentYearMonth) return
+          if (today < t.dayOfMonth) return
+          addRecord({
+            category: t.category,
+            date: `${currentYearMonth}-${String(t.dayOfMonth).padStart(2, '0')}`,
+            amount: t.amount,
+            merchant: t.merchant,
+            description: t.description || 'Recurring expense',
+            status: 'verified',
+          })
+          firedIds.add(t.id)
+          firedMerchants.push(t.merchant)
+        })
+        if (firedIds.size > 0) {
+          set((state) => ({
+            recurringTemplates: state.recurringTemplates.map((t) =>
+              firedIds.has(t.id) ? { ...t, lastFiredMonth: currentYearMonth } : t
+            ),
+          }))
+        }
+        return firedMerchants
+      },
 
       // ── Profile Actions ───────────────────────────────────────────────────
 
@@ -540,6 +617,7 @@ export const useReliefStore = create<ReliefStore>()(
         records: state.records,
         profile: state.profile,
         settings: state.settings,
+        recurringTemplates: state.recurringTemplates,
       }),
     }
   )

@@ -109,6 +109,9 @@ import {
 import { cn } from "@/lib/utils"
 import { OnboardingWizard } from "@/components/OnboardingWizard"
 import { QrScanner, type QrScanResult } from "@/components/QrScanner"
+import { BulkQueue } from "@/components/BulkQueue"
+import { parseEWalletCSV, type EWalletProvider, type ParsedTransaction } from "@/lib/ewallet-parser"
+import type { DbRecord } from "@/lib/supabase"
 import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, calculateTax, calculateNetTaxBalance, type Record as ReliefRecord } from "@/store"
 import { createSupabaseBrowserClient } from "@/utils/supabase/client"
 import { performOCR, type OcrResult } from "@/lib/ocr"
@@ -443,6 +446,7 @@ export default function ReliefTrackApp() {
     records,
     profile,
     settings,
+    recurringTemplates,
     isHydrated,
     addRecord,
     updateRecord,
@@ -450,6 +454,10 @@ export default function ReliefTrackApp() {
     deleteAllRecords,
     updateProfile,
     updateSettings,
+    addTemplate,
+    updateTemplate,
+    deleteTemplate,
+    fireTemplates,
     getReliefTotals,
     getApplicableReliefs,
     getTotalClaimed,
@@ -719,6 +727,69 @@ useEffect(() => {
     }
   }, [isHydrated])
 
+  // ── Supabase DB sync: pull records on sign-in ────────────────────────────
+  useEffect(() => {
+    if (isDemoMode) return
+    const supabase = createSupabaseBrowserClient()
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if ((event === 'SIGNED_IN' || event === 'INITIAL_SESSION') && session?.user) {
+        const userId = session.user.id
+        const shortId = userId.replace(/-/g, '').slice(0, 8)
+        const emailAddr = `receipts+${shortId}@receipts.relieftrack.my`
+        updateSettings({ supabaseUserId: userId, emailForwardingAddress: emailAddr })
+        // Fetch remote records and merge (remote wins on conflict by ID)
+        try {
+          const { fetchRecords } = await import('@/lib/supabase')
+          const { data: remoteRecords } = await fetchRecords(userId)
+          if (remoteRecords && remoteRecords.length > 0) {
+            const { addRecord: storeAdd, records: localRecords, updateRecord: storeUpdate } = useReliefStore.getState()
+            const localIds = new Set(localRecords.map((r) => r.id))
+            let added = 0
+            for (const r of remoteRecords) {
+              if (!r.id) continue
+              const mapped = {
+                id: r.id,
+                category: r.category || 'lifestyle',
+                date: r.date || new Date().toISOString().slice(0, 10),
+                amount: r.amount || 0,
+                merchant: r.merchant || '',
+                description: r.description || '',
+                status: (r.status || 'pending') as 'verified' | 'pending',
+                receiptUrl: r.receipt_url || undefined,
+                receiptFileName: r.receipt_file_name || undefined,
+                invoiceNumber: r.invoice_number || undefined,
+                notes: r.notes || undefined,
+              }
+              if (localIds.has(r.id)) {
+                storeUpdate(r.id, mapped)
+              } else {
+                storeAdd(mapped)
+                added++
+              }
+            }
+            if (added > 0) toast(`Synced ${added} record${added !== 1 ? 's' : ''} from cloud`)
+          }
+        } catch { /* non-critical */ }
+      }
+      if (event === 'SIGNED_OUT') {
+        updateSettings({ supabaseUserId: null, emailForwardingAddress: '' })
+      }
+    })
+    return () => subscription.unsubscribe()
+  }, [isDemoMode])
+
+  // ── Fire recurring templates after hydration ─────────────────────────────
+  useEffect(() => {
+    if (!isHydrated || isDemoMode) return
+    const fired = fireTemplates()
+    if (fired.length > 0) {
+      const month = new Date().toLocaleString('default', { month: 'long', year: 'numeric' })
+      toast(`${fired.length} recurring record${fired.length !== 1 ? 's' : ''} added for ${month}`, {
+        description: fired.slice(0, 3).join(', ') + (fired.length > 3 ? '…' : ''),
+      })
+    }
+  }, [isHydrated])
+
   // Reload Drive folder IDs on startup if Drive is connected but IDs are empty
   // (handles app remount / navigation back where driveFolderIds state was lost)
   useEffect(() => {
@@ -808,6 +879,25 @@ useEffect(() => {
   // nameInput synced via defaultValue + ref pattern (no useEffect loop)
   const [showInstallBanner, setShowInstallBanner] = useState(false)
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null)
+
+  // ── Bulk Queue state ──────────────────────────────────────────────────────
+  const [showBulkQueue, setShowBulkQueue] = useState(false)
+  const [bulkFiles, setBulkFiles] = useState<File[]>([])
+  const bulkInputRef = useRef<HTMLInputElement>(null)
+
+  // ── e-Wallet Import state ─────────────────────────────────────────────────
+  const [showEWalletImport, setShowEWalletImport] = useState(false)
+  const [ewalletProvider, setEwalletProvider] = useState<EWalletProvider>('tng')
+  const [ewalletRows, setEwalletRows] = useState<ParsedTransaction[]>([])
+  const [ewalletSelected, setEwalletSelected] = useState<Set<number>>(new Set())
+  const [ewalletEditCategories, setEwalletEditCategories] = useState<Record<number, string>>({})
+  const ewalletFileRef = useRef<HTMLInputElement>(null)
+
+  // ── Recurring Templates UI state ──────────────────────────────────────────
+  const [showAddTemplate, setShowAddTemplate] = useState(false)
+  const [newTemplate, setNewTemplate] = useState({
+    merchant: '', amount: '', category: 'lifestyle', dayOfMonth: 1, description: '',
+  })
 
   const cameraInputRef = useRef<HTMLInputElement>(null)
   const galleryInputRef = useRef<HTMLInputElement>(null)
@@ -1150,7 +1240,7 @@ useEffect(() => {
       clearTimeout(reVerifyTimeout)
     }
 
-    addRecord({
+    const recPayload = {
       category: newRecord.category,
       date: newRecord.date,
       amount: parseFloat(newRecord.amount),
@@ -1163,52 +1253,66 @@ useEffect(() => {
       taxAmount: newRecord.taxAmount ? parseFloat(newRecord.taxAmount) : undefined,
       lhdNCategory: newRecord.lhdNCategory || undefined,
       recipient: newRecord.recipient || undefined,
-    })
+    }
+    const newId = addRecord(recPayload)
     toast.success("Record added successfully!")
-    if (!settings.googleDriveConnected) {
+    if (!settings.googleDriveConnected && !settings.supabaseUserId) {
       setTimeout(() => toast("Connect Google Drive in Settings to back up your records."), 1200)
     }
-    // Reset form immediately — before Drive sync
+    // Reset form immediately — before Drive/DB sync
     closeAddDrawer()
-    // Build saved record for sync
-    const savedRecord = {
-      category: newRecord.category,
-      date: newRecord.date,
-      amount: parseFloat(newRecord.amount),
-      merchant: newRecord.merchant,
-      description: newRecord.description || undefined,
-      status: verifyResult?.status || "pending",
-      receiptUrl: receiptPreview || undefined,
-      receiptFileName: uploadedFileName || undefined,
-      invoiceNumber: newRecord.invoiceNumber || undefined,
-      taxAmount: newRecord.taxAmount ? parseFloat(newRecord.taxAmount) : undefined,
-      lhdNCategory: newRecord.lhdNCategory || undefined,
-      recipient: newRecord.recipient || undefined,
-    }
     // Fire-and-forget Drive sync
-    syncToDrive('saveRecord', savedRecord as ReliefRecord)
+    syncToDrive('saveRecord', { ...recPayload, id: newId } as ReliefRecord)
+    // Fire-and-forget Supabase sync
+    syncNewRecordToSupabase(newId, recPayload)
     setTimeout(() => setIsSaving(false), 300)
   }
 
   const handleSaveFromReview = () => {
     if (!reviewData) return
     if (!reviewData.vendor.trim() || !reviewData.amount) return
-    addRecord({
+    const recPayload = {
       category: reviewData.category,
       date: reviewData.date,
       amount: parseFloat(reviewData.amount),
       merchant: reviewData.vendor,
-      status: 'verified',
+      status: 'verified' as const,
       receiptUrl: receiptPreview || undefined,
       receiptFileName: uploadedFileName || undefined,
       invoiceNumber: reviewData.invoiceNumber || undefined,
-    })
+    }
+    const newId = addRecord(recPayload)
     toast.success("Record added successfully!")
-    if (!settings.googleDriveConnected) {
+    if (!settings.googleDriveConnected && !settings.supabaseUserId) {
       setTimeout(() => toast("Connect Google Drive in Settings to back up your records."), 1200)
     }
+    syncNewRecordToSupabase(newId, recPayload)
     closeAddDrawer()
   }
+
+  // Fire-and-forget Supabase insert for a saved record
+  const syncNewRecordToSupabase = useCallback(async (id: string, record: Partial<ReliefRecord>) => {
+    const userId = settings.supabaseUserId
+    if (!userId || isDemoMode) return
+    try {
+      const { insertRecord } = await import('@/lib/supabase')
+      await insertRecord({
+        user_id: userId,
+        merchant: record.merchant || '',
+        category: record.category || 'lifestyle',
+        date: record.date || new Date().toISOString().slice(0, 10),
+        amount: record.amount || 0,
+        status: record.status || 'pending',
+        description: record.description || undefined,
+        receipt_url: record.receiptUrl || undefined,
+        receipt_file_name: record.receiptFileName || undefined,
+        invoice_number: record.invoiceNumber || undefined,
+        lhdn_category: record.lhdNCategory || undefined,
+        recipient: record.recipient || undefined,
+        notes: record.notes || undefined,
+      } as Omit<DbRecord, 'id' | 'created_at' | 'updated_at'>)
+    } catch { /* non-critical */ }
+  }, [settings.supabaseUserId, isDemoMode])
 
   const closeAddDrawer = () => {
     setIsAddModalOpen(false)
@@ -1234,6 +1338,11 @@ useEffect(() => {
       lhdNCategory: "",
       recipient: "auto",
     })
+    setShowBulkQueue(false)
+    setBulkFiles([])
+    setShowEWalletImport(false)
+    setEwalletRows([])
+    setEwalletSelected(new Set())
   }
 
   // ── Export Handlers ────────────────────────────────────────────────────
@@ -2879,6 +2988,174 @@ useEffect(() => {
             </div>
             <h2 className=" font-semibold text-foreground">About</h2>
           </div>
+          {/* ── Email Receipt Forwarding ── */}
+          {settings.supabaseUserId && settings.emailForwardingAddress && (
+            <Card className="overflow-hidden border-0 shadow-sm ring-1 ring-border">
+              <CardHeader className="pb-3 pt-5 px-5">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Bell className="h-4 w-4 text-emerald-500" />
+                  Email Receipt Forwarding
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3 px-5 pb-5">
+                <p className="text-sm text-muted-foreground">
+                  Forward any receipt email to this address — attachments are automatically extracted and added as pending records.
+                </p>
+                <div className="flex items-center gap-2 rounded-xl border bg-muted/40 px-3 py-2.5">
+                  <code className="flex-1 text-xs font-mono text-foreground break-all">
+                    {settings.emailForwardingAddress}
+                  </code>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(settings.emailForwardingAddress)
+                      toast("Email address copied!")
+                    }}
+                    className="shrink-0 rounded-lg border px-2.5 py-1 text-xs font-medium hover:bg-muted"
+                  >
+                    Copy
+                  </button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* ── Recurring Expense Templates ── */}
+          <Card className="overflow-hidden border-0 shadow-sm ring-1 ring-border">
+            <CardHeader className="pb-3 pt-5 px-5">
+              <div className="flex items-center justify-between">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <CalendarClock className="h-4 w-4 text-indigo-500" />
+                  Recurring Expenses
+                </CardTitle>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 text-xs"
+                  onClick={() => setShowAddTemplate(true)}
+                >
+                  <Plus className="mr-1 h-3 w-3" /> Add
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="px-5 pb-5 space-y-3">
+              {recurringTemplates.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-3">
+                  No recurring expenses yet. Add subscriptions, insurance, or gym fees to auto-record them monthly.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {recurringTemplates.map((t) => {
+                    const cat = RELIEF_CATEGORIES.find((c) => c.id === t.category)
+                    const nextDate = new Date()
+                    nextDate.setDate(t.dayOfMonth)
+                    if (nextDate < new Date()) nextDate.setMonth(nextDate.getMonth() + 1)
+                    return (
+                      <div key={t.id} className="flex items-center gap-3 rounded-xl border px-3.5 py-3">
+                        <Switch
+                          checked={t.active}
+                          onCheckedChange={(v) => updateTemplate(t.id, { active: v })}
+                          className="shrink-0"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium truncate">{t.merchant}</p>
+                          <p className="text-xs text-muted-foreground">
+                            RM {t.amount} · {cat?.name || t.category} · day {t.dayOfMonth}
+                          </p>
+                        </div>
+                        <Badge variant="outline" className="text-xs shrink-0">
+                          Next: {nextDate.toLocaleDateString('en-MY', { day: 'numeric', month: 'short' })}
+                        </Badge>
+                        <button
+                          onClick={() => deleteTemplate(t.id)}
+                          className="shrink-0 text-muted-foreground hover:text-destructive"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {showAddTemplate && (
+                <div className="space-y-3 rounded-xl border bg-muted/30 p-4">
+                  <p className="text-sm font-medium">New Recurring Expense</p>
+                  <div className="space-y-2">
+                    <Input
+                      placeholder="Merchant (e.g. Netflix, Gym)"
+                      value={newTemplate.merchant}
+                      onChange={(e) => setNewTemplate({ ...newTemplate, merchant: e.target.value })}
+                      className="h-10"
+                    />
+                    <div className="flex gap-2">
+                      <Input
+                        type="number"
+                        placeholder="Amount (RM)"
+                        value={newTemplate.amount}
+                        onChange={(e) => setNewTemplate({ ...newTemplate, amount: e.target.value })}
+                        className="h-10 flex-1"
+                      />
+                      <Select
+                        value={String(newTemplate.dayOfMonth)}
+                        onValueChange={(v) => setNewTemplate({ ...newTemplate, dayOfMonth: parseInt(v) })}
+                      >
+                        <SelectTrigger className="h-10 w-24">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+                            <SelectItem key={d} value={String(d)}>Day {d}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <Select
+                      value={newTemplate.category}
+                      onValueChange={(v) => setNewTemplate({ ...newTemplate, category: v })}
+                    >
+                      <SelectTrigger className="h-10">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {RELIEF_CATEGORIES.map((cat) => (
+                          <SelectItem key={cat.id} value={cat.id}>{cat.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      className="flex-1 h-10"
+                      onClick={() => { setShowAddTemplate(false); setNewTemplate({ merchant: '', amount: '', category: 'lifestyle', dayOfMonth: 1, description: '' }) }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      className="flex-1 h-10"
+                      disabled={!newTemplate.merchant.trim() || !newTemplate.amount}
+                      onClick={() => {
+                        addTemplate({
+                          merchant: newTemplate.merchant.trim(),
+                          amount: parseFloat(newTemplate.amount) || 0,
+                          category: newTemplate.category,
+                          dayOfMonth: newTemplate.dayOfMonth,
+                          description: newTemplate.description,
+                          active: true,
+                        })
+                        setShowAddTemplate(false)
+                        setNewTemplate({ merchant: '', amount: '', category: 'lifestyle', dayOfMonth: 1, description: '' })
+                        toast("Recurring expense added")
+                      }}
+                    >
+                      Save Template
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           <Card className="overflow-hidden border-0 shadow-sm ring-1 ring-border">
             <CardContent className="space-y-5 p-5">
               <div className="flex items-center gap-3.5">
@@ -3102,8 +3379,208 @@ useEffect(() => {
             />
           )}
 
+          {/* Hidden bulk file input */}
+          <input
+            ref={bulkInputRef}
+            type="file"
+            accept="image/*,application/pdf"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              const files = Array.from(e.target.files || [])
+              if (files.length > 1) {
+                setBulkFiles(files)
+                setShowBulkQueue(true)
+              } else if (files.length === 1) {
+                handleFileUpload(files[0])
+              }
+              e.target.value = ""
+            }}
+          />
+
+          {/* ── Bulk Queue ── */}
+          {showBulkQueue && bulkFiles.length > 0 && (
+            <BulkQueue
+              files={bulkFiles}
+              onCancel={() => { setShowBulkQueue(false); setBulkFiles([]) }}
+              onDone={(saved, skipped) => {
+                setShowBulkQueue(false)
+                setBulkFiles([])
+                setIsAddModalOpen(false)
+                toast.success(`${saved} record${saved !== 1 ? 's' : ''} saved`, {
+                  description: skipped > 0 ? `${skipped} skipped` : undefined,
+                })
+              }}
+              onSave={(data) => {
+                const id = addRecord({
+                  category: data.category,
+                  date: data.date,
+                  amount: parseFloat(data.amount) || 0,
+                  merchant: data.vendor,
+                  description: '',
+                  status: 'verified',
+                  receiptUrl: data.receiptUrl,
+                  receiptFileName: data.receiptFileName,
+                })
+                syncNewRecordToSupabase(id, {
+                  category: data.category, date: data.date,
+                  amount: parseFloat(data.amount) || 0, merchant: data.vendor,
+                  status: 'verified', receiptUrl: data.receiptUrl,
+                  receiptFileName: data.receiptFileName,
+                })
+              }}
+            />
+          )}
+
+          {/* ── e-Wallet Import ── */}
+          {showEWalletImport && !showBulkQueue && (
+            <div className="space-y-4 p-4">
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold">Import e-Wallet</h3>
+                <button onClick={() => setShowEWalletImport(false)} className="text-muted-foreground hover:text-foreground">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              {/* Provider selector */}
+              <div className="flex gap-2">
+                {(['tng', 'grab', 'boost'] as EWalletProvider[]).map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => setEwalletProvider(p)}
+                    className={cn(
+                      "flex-1 rounded-lg border py-2 text-sm font-medium transition-all",
+                      ewalletProvider === p
+                        ? "border-emerald-500 bg-emerald-50 text-emerald-700 dark:border-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-300"
+                        : "border-border text-muted-foreground hover:border-emerald-300"
+                    )}
+                  >
+                    {p === 'tng' ? "TnG eWallet" : p === 'grab' ? "GrabPay" : "Boost"}
+                  </button>
+                ))}
+              </div>
+              {/* CSV upload */}
+              {ewalletRows.length === 0 ? (
+                <Button
+                  variant="outline"
+                  className="h-20 w-full flex-col gap-2"
+                  onClick={() => ewalletFileRef.current?.click()}
+                >
+                  <Upload className="h-6 w-6 text-primary" />
+                  <span className="text-sm">Select CSV export file</span>
+                </Button>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">{ewalletRows.length} transactions found</span>
+                    <button
+                      onClick={() => setEwalletSelected(new Set(ewalletRows.map((_, i) => i)))}
+                      className="text-emerald-600 hover:underline text-xs"
+                    >
+                      Select all
+                    </button>
+                  </div>
+                  <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1">
+                    {ewalletRows.map((row, i) => (
+                      <div
+                        key={i}
+                        className={cn(
+                          "flex items-center gap-2 rounded-lg border px-3 py-2 cursor-pointer transition-colors",
+                          ewalletSelected.has(i) ? "border-emerald-500 bg-emerald-50/50 dark:bg-emerald-950/20" : "border-border"
+                        )}
+                        onClick={() => {
+                          setEwalletSelected((prev) => {
+                            const next = new Set(prev)
+                            next.has(i) ? next.delete(i) : next.add(i)
+                            return next
+                          })
+                        }}
+                      >
+                        <div className={cn(
+                          "h-4 w-4 shrink-0 rounded border flex items-center justify-center",
+                          ewalletSelected.has(i) ? "border-emerald-500 bg-emerald-500" : "border-muted-foreground"
+                        )}>
+                          {ewalletSelected.has(i) && <Check className="h-2.5 w-2.5 text-white" />}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium truncate">{row.merchant}</p>
+                          <p className="text-xs text-muted-foreground">{row.date}</p>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-sm font-semibold">RM {row.amount.toFixed(2)}</p>
+                          <select
+                            className="text-xs text-muted-foreground bg-transparent border-none cursor-pointer"
+                            value={ewalletEditCategories[i] || row.category}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => {
+                              e.stopPropagation()
+                              setEwalletEditCategories((prev) => ({ ...prev, [i]: e.target.value }))
+                            }}
+                          >
+                            {RELIEF_CATEGORIES.map((cat) => (
+                              <option key={cat.id} value={cat.id}>{cat.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <Button
+                    className="w-full h-11"
+                    disabled={ewalletSelected.size === 0}
+                    onClick={() => {
+                      let count = 0
+                      ewalletSelected.forEach((i) => {
+                        const row = ewalletRows[i]
+                        const cat = ewalletEditCategories[i] || row.category
+                        const id = addRecord({
+                          category: cat,
+                          date: row.date,
+                          amount: row.amount,
+                          merchant: row.merchant,
+                          description: 'Imported from e-wallet',
+                          status: 'verified',
+                        })
+                        syncNewRecordToSupabase(id, {
+                          category: cat, date: row.date, amount: row.amount,
+                          merchant: row.merchant, status: 'verified',
+                        })
+                        count++
+                      })
+                      toast.success(`${count} records imported`)
+                      setShowEWalletImport(false)
+                      setEwalletRows([])
+                      setEwalletSelected(new Set())
+                      setIsAddModalOpen(false)
+                    }}
+                  >
+                    Import {ewalletSelected.size} Selected
+                  </Button>
+                </div>
+              )}
+              <input
+                ref={ewalletFileRef}
+                type="file"
+                accept=".csv,text/csv"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0]
+                  if (!f) return
+                  const reader = new FileReader()
+                  reader.onload = (ev) => {
+                    const text = ev.target?.result as string
+                    const rows = parseEWalletCSV(text, ewalletProvider)
+                    setEwalletRows(rows)
+                    setEwalletSelected(new Set(rows.map((_, i) => i)))
+                  }
+                  reader.readAsText(f)
+                  e.target.value = ""
+                }}
+              />
+            </div>
+          )}
+
           {/* ── Upload Options ── */}
-          {!isProcessing && !showOcrReview && !showOCRForm && !isVerifying && !showQrScanner ? (
+          {!isProcessing && !showOcrReview && !showOCRForm && !isVerifying && !showQrScanner && !showBulkQueue && !showEWalletImport ? (
             // Upload options
             <div className="space-y-4 p-4">
               <Button
@@ -3125,6 +3602,17 @@ useEffect(() => {
               <Button
                 variant="outline"
                 className="h-24 w-full flex-col gap-2"
+                onClick={() => bulkInputRef.current?.click()}
+              >
+                <div className="relative">
+                  <Upload className="h-8 w-8 text-primary" />
+                  <span className="absolute -bottom-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-[9px] font-bold text-primary-foreground">+</span>
+                </div>
+                <span>Bulk Upload (Multiple)</span>
+              </Button>
+              <Button
+                variant="outline"
+                className="h-24 w-full flex-col gap-2"
                 onClick={() => setShowQrScanner(true)}
               >
                 <svg className="h-8 w-8 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -3134,6 +3622,20 @@ useEffect(() => {
                   <path d="M14 14h2v2h-2zM18 14h3M14 18h3M18 18v3M21 18v.01" />
                 </svg>
                 <span>Scan e-Invoice QR</span>
+              </Button>
+              <Button
+                variant="outline"
+                className="h-16 w-full flex-col gap-1"
+                onClick={() => setShowEWalletImport(true)}
+              >
+                <div className="flex items-center gap-2">
+                  <svg className="h-5 w-5 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="1" y="4" width="22" height="16" rx="2" ry="2" />
+                    <line x1="1" y1="10" x2="23" y2="10" />
+                  </svg>
+                  <span className="text-sm">Import e-Wallet CSV</span>
+                </div>
+                <span className="text-xs text-muted-foreground">TnG · GrabPay · Boost</span>
               </Button>
               <div className="relative">
                 <div className="absolute inset-0 flex items-center">
