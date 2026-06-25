@@ -1678,6 +1678,113 @@ useEffect(() => {
             </CardContent>
           </Card>
 
+          {/* Smart Insight Cards */}
+          {(() => {
+            const today = new Date()
+            const yearEnd = new Date(`${settings.defaultTaxYear}-12-31`)
+            const daysLeft = Math.ceil((yearEnd.getTime() - today.getTime()) / 86400000)
+            const insights: Array<{ type: 'unclaimed' | 'near-limit' | 'maxed' | 'deadline' | 'income'; reliefId?: string; reliefName?: string; claimed?: number; limit?: number; remaining?: number }> = []
+
+            // Income prompt (highest priority if no income set)
+            const grossIncome = settings.eaFormByYear?.[parseInt(settings.defaultTaxYear)]?.grossIncome ?? displayProfile.grossIncome ?? 0
+            if (grossIncome <= 0) {
+              insights.push({ type: 'income' })
+            }
+
+            // Per-category insights
+            applicableReliefs.forEach((relief) => {
+              if (relief.alwaysShow) return // Skip auto-reliefs (individual)
+              const claimed = reliefTotals[relief.id] || 0
+              const maxLimit = relief.perItem
+                ? relief.id === "children_under18"
+                  ? displayProfile.childrenUnder18 * relief.maxLimit
+                  : displayProfile.childrenEducation * relief.maxLimit
+                : relief.maxLimit
+              const pct = maxLimit > 0 ? (claimed / maxLimit) * 100 : 0
+              if (claimed === 0) {
+                insights.push({ type: 'unclaimed', reliefId: relief.id, reliefName: relief.name, claimed: 0, limit: maxLimit })
+              } else if (pct >= 100) {
+                insights.push({ type: 'maxed', reliefId: relief.id, reliefName: relief.name, claimed, limit: maxLimit })
+              } else if (pct >= 80) {
+                insights.push({ type: 'near-limit', reliefId: relief.id, reliefName: relief.name, claimed, limit: maxLimit, remaining: maxLimit - claimed })
+              }
+            })
+
+            // Deadline alert (only if within 90 days)
+            if (daysLeft > 0 && daysLeft <= 90) {
+              insights.push({ type: 'deadline' })
+            }
+
+            if (insights.length === 0) return null
+
+            // Show at most 3 insights
+            const shown = insights.slice(0, 3)
+            return (
+              <div className="space-y-2">
+                <h2 className="font-semibold text-foreground">Insights</h2>
+                {shown.map((ins, i) => {
+                  if (ins.type === 'income') return (
+                    <button
+                      key="income"
+                      onClick={() => { setActiveTab("profile"); router.push(pathname + "?tab=profile") }}
+                      className="flex w-full items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left transition-all hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/30 dark:hover:bg-amber-950/50"
+                    >
+                      <AlertTriangle className="h-5 w-5 shrink-0 text-amber-500" />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-amber-800 dark:text-amber-200">Add your income</p>
+                        <p className="text-sm text-amber-700 dark:text-amber-300">See your estimated tax savings →</p>
+                      </div>
+                    </button>
+                  )
+                  if (ins.type === 'unclaimed') return (
+                    <button
+                      key={`unclaimed-${ins.reliefId}`}
+                      onClick={() => {
+                        setNewRecord(prev => ({ ...prev, category: ins.reliefId! }))
+                        setIsAddModalOpen(true)
+                      }}
+                      className="flex w-full items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-left transition-all hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950/30 dark:hover:bg-blue-950/50"
+                    >
+                      <AlertCircle className="h-5 w-5 shrink-0 text-blue-500" />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-blue-800 dark:text-blue-200 truncate">{ins.reliefName} — nothing claimed yet</p>
+                        <p className="text-sm text-blue-700 dark:text-blue-300">Add receipt →</p>
+                      </div>
+                    </button>
+                  )
+                  if (ins.type === 'near-limit') return (
+                    <div key={`near-${ins.reliefId}`} className="flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/30">
+                      <AlertTriangle className="h-5 w-5 shrink-0 text-amber-500" />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-amber-800 dark:text-amber-200 truncate">{ins.reliefName} almost maxed</p>
+                        <p className="text-sm text-amber-700 dark:text-amber-300">{formatRM(ins.remaining!)} remaining before limit</p>
+                      </div>
+                    </div>
+                  )
+                  if (ins.type === 'maxed') return (
+                    <div key={`maxed-${ins.reliefId}`} className="flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 dark:border-emerald-800 dark:bg-emerald-950/30">
+                      <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-500" />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-emerald-800 dark:text-emerald-200 truncate">{ins.reliefName} maxed</p>
+                        <p className="text-sm text-emerald-700 dark:text-emerald-300">{formatRM(ins.limit!)} claimed — great job!</p>
+                      </div>
+                    </div>
+                  )
+                  if (ins.type === 'deadline') return (
+                    <div key="deadline" className="flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 dark:border-red-800 dark:bg-red-950/30">
+                      <AlertTriangle className="h-5 w-5 shrink-0 text-red-500" />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-red-800 dark:text-red-200">Only {daysLeft} days left in YA {settings.defaultTaxYear}</p>
+                        <p className="text-sm text-red-700 dark:text-red-300">Add receipts before 31 Dec</p>
+                      </div>
+                    </div>
+                  )
+                  return null
+                })}
+              </div>
+            )
+          })()}
+
           {/* Applicable Reliefs */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -1701,8 +1808,8 @@ useEffect(() => {
               return (
                 <Card
                   key={relief.id}
-                  className={`transition-all hover:shadow-md ${hasSubcategories ? 'cursor-pointer' : ''}`}
-                  onClick={() => hasSubcategories ? setExpandedCategory(expandedCategory === relief.id ? null : relief.id) : undefined}
+                  className="cursor-pointer transition-all hover:shadow-md"
+                  onClick={() => setExpandedCategory(expandedCategory === relief.id ? null : relief.id)}
                 >
                   <CardContent className="p-4">
                     <div className="flex items-start gap-3">
@@ -1719,11 +1826,7 @@ useEffect(() => {
                               {relief.description}
                             </p>
                           </div>
-                          {hasSubcategories ? (
-                            <ChevronRight className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 ${expandedCategory === relief.id ? 'rotate-90' : ''}`} />
-                          ) : (
-                            <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-                          )}
+                          <ChevronRight className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 ${expandedCategory === relief.id ? 'rotate-90' : ''}`} />
                         </div>
                         <div className="mt-2 space-y-1">
                           <div className="flex items-center justify-between text-sm">
@@ -1742,33 +1845,63 @@ useEffect(() => {
                         </div>
                       </div>
                     </div>
-                    {expandedCategory === relief.id && relief.subcategories && (
-                      <div className="mt-4 space-y-2 border-t pt-4">
-                        {relief.subcategories.map((sub) => {
-                          let subClaimed = floorRM(getSubCategoryTotal(displayRecords, relief.id, sub.id))
-                          // Inject EA Form values into correct subcategories (they're not stored as records)
-                          const currentEA = getCurrentYearEAForm()
-                          if (relief.id === 'epf_insurance' && currentEA?.confirmed) {
-                            if (sub.id === 'epf_mandatory') subClaimed += floorRM(Math.min(currentEA.epf || 0, 4000))
-                            if (sub.id === 'epf_socso') subClaimed += floorRM(Math.min(currentEA.socso || 0, 350))
-                          }
-                          const effectiveMax = sub.maxLimit || maxLimit
-                          const subPct = Math.min(Math.round((subClaimed / effectiveMax) * 100), 100)
-                          return (
-                            <div key={sub.id} className="flex items-center gap-3">
-                              <div className="w-36 text-sm text-muted-foreground truncate">{sub.name}</div>
-                              <div className="flex-1">
-                                <div className="h-2 overflow-hidden rounded-full bg-muted">
-                                  <div className="h-full rounded-full transition-all" style={{ width: `${subPct}%`, backgroundColor: getColor(relief.color).hex }} />
+                    {expandedCategory === relief.id && (
+                      <div className="mt-4 space-y-3 border-t pt-4">
+                        {/* Subcategory breakdown */}
+                        {relief.subcategories && (
+                          <div className="space-y-2">
+                            {relief.subcategories.map((sub) => {
+                              let subClaimed = floorRM(getSubCategoryTotal(displayRecords, relief.id, sub.id))
+                              const currentEA = getCurrentYearEAForm()
+                              if (relief.id === 'epf_insurance' && currentEA?.confirmed) {
+                                if (sub.id === 'epf_mandatory') subClaimed += floorRM(Math.min(currentEA.epf || 0, 4000))
+                                if (sub.id === 'epf_socso') subClaimed += floorRM(Math.min(currentEA.socso || 0, 350))
+                              }
+                              const effectiveMax = sub.maxLimit || maxLimit
+                              const subPct = Math.min(Math.round((subClaimed / effectiveMax) * 100), 100)
+                              return (
+                                <div key={sub.id} className="flex items-center gap-3">
+                                  <div className="w-36 text-sm text-muted-foreground truncate">{sub.name}</div>
+                                  <div className="flex-1">
+                                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                                      <div className="h-full rounded-full transition-all" style={{ width: `${subPct}%`, backgroundColor: getColor(relief.color).hex }} />
+                                    </div>
+                                  </div>
+                                  <div className="text-sm font-medium min-w-[4rem] text-right">
+                                    {formatRM(subClaimed)} <span className="text-muted-foreground text-xs">/ {effectiveMax > 0 && effectiveMax < maxLimit ? formatRM(effectiveMax) : 'unlimited'}</span>
+                                  </div>
                                 </div>
-                              </div>
-                              <div className="text-sm font-medium min-w-[4rem] text-right">
-                                {formatRM(subClaimed)} <span className="text-muted-foreground text-xs">/ {effectiveMax > 0 && effectiveMax < maxLimit ? formatRM(effectiveMax) : 'unlimited'}</span>
-                              </div>
-                            </div>
-                          )
-                        })}
-
+                              )
+                            })}
+                          </div>
+                        )}
+                        {/* What qualifies? */}
+                        <div className="rounded-lg bg-muted/50 px-3 py-2.5">
+                          <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">What qualifies?</p>
+                          <p className="text-sm text-foreground leading-relaxed">{relief.description}</p>
+                          {relief.subcategories && (
+                            <ul className="mt-2 space-y-0.5">
+                              {relief.subcategories.map(sub => (
+                                <li key={sub.id} className="flex items-start gap-1.5 text-sm text-muted-foreground">
+                                  <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
+                                  <span>{sub.name}{sub.description ? ` — ${sub.description}` : ''}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                        {/* Add receipt CTA */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setNewRecord(prev => ({ ...prev, category: relief.id }))
+                            setIsAddModalOpen(true)
+                          }}
+                          className="flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 py-2 text-sm font-medium text-emerald-700 transition-all hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          Add Receipt for {relief.name.split(" ")[0]}
+                        </button>
                       </div>
                     )}
                   </CardContent>
