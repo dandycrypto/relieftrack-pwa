@@ -657,6 +657,56 @@ function inferRecipient(ocrText: string, profile: UserProfile | null): string {
 
 // ─── Main OCR Function ───────────────────────────────────────────────────────
 
+/**
+ * Parse all structured fields from raw OCR text.
+ * Used by performOCR after server returns minimal {rawText, confidence} payload.
+ */
+function parseFromRawText(rawText: string): {
+  amount: number | null
+  date: string | null
+  time: string | null
+  merchant: string
+  description: string
+  suggestedCategory: string
+  invoiceNumber: string | null
+  taxAmount: number | null
+  currency: string
+  taxExempt: boolean
+  lineItems: string
+  notes: string
+  lhdNCategory: string
+  recipient: string
+} {
+  const { date, time } = parseDate(rawText)
+  const amount = extractAmount(rawText)
+  const merchant = extractVendor(rawText)
+  const invoiceNumber = extractInvoiceNumber(rawText)
+  const suggestedCategory = suggestCategory(rawText)
+  const taxAmount = extractTaxAmount(rawText)
+  const currency = detectCurrency(rawText)
+  const taxExempt = detectTaxExempt(rawText)
+  const lineItems = extractLineItems(rawText)
+  const notes = extractNotes(rawText, invoiceNumber, time)
+  const { lhdNCategory, recipient } = detectTaxDeduction(rawText, { category: suggestedCategory })
+
+  return {
+    amount,
+    date,
+    time,
+    merchant,
+    description: lineItems || merchant,
+    suggestedCategory,
+    invoiceNumber,
+    taxAmount,
+    currency,
+    taxExempt,
+    lineItems,
+    notes,
+    lhdNCategory,
+    recipient,
+  }
+}
+
 export async function performOCR(
   file: File,
   onProgress?: (pct: number) => void
@@ -681,6 +731,28 @@ export async function performOCR(
   }
 
   const result: OCRResult = await response.json()
+
+  // ── Client-side parsing (server only returns rawText + confidence) ──
+  // Parse vendor, amount, date, category, etc. from raw OCR text on the client
+  // so the dashboard review form is pre-populated even with our minimal server response.
+  if (result.rawText && result.rawText.length > 0) {
+    const parsed = parseFromRawText(result.rawText)
+    // Server-provided fields win when present (e.g. EA form override, PDF with metadata)
+    result.amount = result.amount ?? parsed.amount
+    result.date = result.date ?? parsed.date
+    result.time = result.time ?? parsed.time
+    result.merchant = result.merchant && result.merchant !== 'Unknown Merchant' ? result.merchant : parsed.merchant
+    result.description = result.description || parsed.description
+    result.suggestedCategory = result.suggestedCategory || parsed.suggestedCategory
+    result.invoiceNumber = result.invoiceNumber ?? parsed.invoiceNumber
+    result.taxAmount = result.taxAmount ?? parsed.taxAmount
+    result.currency = result.currency || parsed.currency
+    result.taxExempt = result.taxExempt || parsed.taxExempt
+    result.lineItems = result.lineItems || parsed.lineItems
+    result.notes = result.notes || parsed.notes
+    if (!result.lhdNCategory) result.lhdNCategory = parsed.lhdNCategory
+    if (!result.recipient) result.recipient = parsed.recipient
+  }
 
   // ── Recipient inference (PART 2) ──────────────────────────────────────────
   // Only infer for medical/childcare categories

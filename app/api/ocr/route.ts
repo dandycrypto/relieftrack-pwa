@@ -10,6 +10,39 @@ export const maxDuration = 60
 // Floor to nearest RM (no cents) — LHDN whole-number rule
 const floorRM = (n: number) => Math.floor(n)
 
+// ── OCR script path (relative to project root, works in dev + prod standalone) ──
+const OCR_SCRIPT = path.join(process.cwd(), 'scripts', 'ocr_rapid.py')
+
+/**
+ * Run server-side RapidOCR via Python subprocess.
+ * Returns parsed JSON output from ocr_rapid.py: { rawText, confidence, lines, ... }
+ */
+async function runRapidOCR(imagePath: string, timeoutMs = 45000): Promise<{
+  rawText: string
+  confidence: number
+  lines: Array<{ text: string; confidence: number; bbox: number[][] }>
+  preprocessed?: boolean
+  elapsed_ms?: number
+}> {
+  const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve, reject) => {
+    const proc = spawn('python3', [OCR_SCRIPT, imagePath], { timeout: timeoutMs })
+    let stdout = '', stderr = ''
+    proc.stdout.on('data', (data) => { stdout += data.toString() })
+    proc.stderr.on('data', (data) => { stderr += data.toString() })
+    proc.on('close', (code) => resolve({ stdout, stderr, code: code || 0 }))
+    proc.on('error', (err) => reject(err))
+  })
+  if (result.code !== 0) {
+    console.error('[OCR] script exit', result.code, 'stderr:', result.stderr.slice(0, 500))
+    throw new Error(`OCR script exited with code ${result.code}: ${result.stderr.slice(0, 200)}`)
+  }
+  try {
+    return JSON.parse(result.stdout)
+  } catch (e) {
+    throw new Error(`OCR JSON parse failed: ${e instanceof Error ? e.message : e}`)
+  }
+}
+
 // ── EA Form Detection ────────────────────────────────────────────────────────
 
 interface EAFormData {
@@ -499,19 +532,11 @@ export async function POST(request: NextRequest) {
         interface PageOCRResult { rawText: string; json: Record<string, unknown> }
         const pageResults: PageOCRResult[] = []
         for (const imgPath of imagePaths) {
-          const ocrResult = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve, reject) => {
-            const proc = spawn('python3', ['/tmp/ocr_rapid.py', imgPath], { timeout: 45000 })
-            let stdout = '', stderr = ''
-            proc.stdout.on('data', (data) => { stdout += data.toString() })
-            proc.stderr.on('data', (data) => { stderr += data.toString() })
-            proc.on('close', (code) => resolve({ stdout, stderr, code: code || 0 }))
-            proc.on('error', (err) => reject(err))
-          })
-          if (ocrResult.code === 0) {
-            try {
-              const json = JSON.parse(ocrResult.stdout)
-              pageResults.push({ rawText: json.rawText || '', json })
-            } catch {}
+          try {
+            const json = await runRapidOCR(imgPath)
+            pageResults.push({ rawText: json.rawText || '', json: json as unknown as Record<string, unknown> })
+          } catch (e) {
+            console.error('[OCR] page failed:', imgPath, e instanceof Error ? e.message : e)
           }
           // Clean up image
           try { await unlink(imgPath) } catch {}
@@ -539,22 +564,22 @@ export async function POST(request: NextRequest) {
         }
 
         return NextResponse.json({
-          amount: parsed.amount ?? null,
-          date: parsed.date ?? null,
-          merchant: parsed.merchant ?? 'Unknown Merchant',
-          description: parsed.description ?? '',
-          suggestedCategory: parsed.suggestedCategory ?? 'lifestyle',
-          invoiceNumber: parsed.invoiceNumber ?? null,
-          taxAmount: parsed.taxAmount ?? null,
-          lhdNCategory: parsed.lhdNCategory ?? '',
-          recipient: parsed.recipient ?? '',
+          amount: null,
+          date: null,
+          merchant: eaFormData?.employerName ?? 'Unknown Employer',
+          description: `EA Form ${eaFormData?.taxYear ?? ''}`,
+          suggestedCategory: 'lifestyle',
+          invoiceNumber: null,
+          taxAmount: null,
+          lhdNCategory: '',
+          recipient: '',
           rawText,
           confidence: parsed.confidence ?? 0,
-          time: parsed.time ?? null,
-          currency: parsed.currency ?? 'MYR',
-          taxExempt: parsed.taxExempt ?? false,
-          lineItems: parsed.lineItems ?? '',
-          notes: parsed.notes ?? '',
+          time: null,
+          currency: 'MYR',
+          taxExempt: false,
+          lineItems: '',
+          notes: '',
           eaFormData,
         })
       }
@@ -564,27 +589,16 @@ export async function POST(request: NextRequest) {
 
     } else {
       // ── Photo: use RapidOCR directly ───────────────────────────────────────
-      const ocrResult = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve, reject) => {
-        const proc = spawn('python3', ['/tmp/ocr_rapid.py', tmpPath], { timeout: 45000 })
-        let stdout = '', stderr = ''
-        proc.stdout.on('data', (data) => { stdout += data.toString() })
-        proc.stderr.on('data', (data) => { stderr += data.toString() })
-        proc.on('close', (code) => resolve({ stdout, stderr, code: code || 0 }))
-        proc.on('error', (err) => reject(err))
-      })
-
-      if (ocrResult.code !== 0) {
-        return NextResponse.json({ error: 'OCR processing failed' }, { status: 500 })
-      }
-
-      let parsed: Record<string, unknown> = {}
+      let parsed: { rawText: string; confidence: number; lines?: unknown[] }
       try {
-        parsed = JSON.parse(ocrResult.stdout)
-      } catch {
-        return NextResponse.json({ error: 'OCR JSON parse failed' }, { status: 500 })
+        parsed = await runRapidOCR(tmpPath)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : 'OCR processing failed'
+        console.error('[OCR] photo failed:', msg)
+        return NextResponse.json({ error: msg }, { status: 500 })
       }
 
-      rawText = (parsed.rawText as string) || ''
+      rawText = parsed.rawText || ''
 
       // Clean up
       try { await unlink(tmpPath) } catch {}
@@ -598,23 +612,24 @@ export async function POST(request: NextRequest) {
         }
       }
 
+      // Photo OCR returns rawText only — client (lib/ocr.ts) parses vendor/amount/date/etc.
       return NextResponse.json({
-        amount: parsed.amount ?? null,
-        date: parsed.date ?? null,
-        merchant: parsed.merchant ?? 'Unknown Merchant',
-        description: parsed.description ?? '',
-        suggestedCategory: parsed.suggestedCategory ?? 'lifestyle',
-        invoiceNumber: parsed.invoiceNumber ?? null,
-        taxAmount: parsed.taxAmount ?? null,
-        lhdNCategory: parsed.lhdNCategory ?? '',
-        recipient: parsed.recipient ?? '',
+        amount: null,
+        date: null,
+        merchant: 'Unknown Merchant',
+        description: '',
+        suggestedCategory: 'lifestyle',
+        invoiceNumber: null,
+        taxAmount: null,
+        lhdNCategory: '',
+        recipient: '',
         rawText,
         confidence: parsed.confidence ?? 0,
-        time: parsed.time ?? null,
-        currency: parsed.currency ?? 'MYR',
-        taxExempt: parsed.taxExempt ?? false,
-        lineItems: parsed.lineItems ?? '',
-        notes: parsed.notes ?? '',
+        time: null,
+        currency: 'MYR',
+        taxExempt: false,
+        lineItems: '',
+        notes: '',
         eaFormData,
       })
     }
