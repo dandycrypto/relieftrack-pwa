@@ -769,11 +769,9 @@ useEffect(() => {
   const [mounted, setMounted] = useState(false)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [deleteOneId, setDeleteOneId] = useState<string | null>(null)
-  const [isSavingProfile, setIsSavingProfile] = useState(false)
+  const [profileSavedMsg, setProfileSavedMsg] = useState('')
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null)
   const [taxDetailsExpanded, setTaxDetailsExpanded] = useState(false)
-  const [showSaveSuccessDialog, setShowSaveSuccessDialog] = useState(false)
-  const [showDriveConnectPrompt, setShowDriveConnectPrompt] = useState(false)
   const [yearPickerOpen, setYearPickerOpen] = useState(false)
   const [eaFormDialogOpen, setEaFormDialogOpen] = useState(false)
   const [eaFormData, setEaFormData] = useState<{
@@ -800,15 +798,6 @@ useEffect(() => {
       setEaFormVerifyResult(v)
     }
   }, [eaFormData?.grossIncome, eaFormData?.employerName, eaFormData?.epfContribution, eaFormData?.socsoContribution, eaFormData?.pcbPaid])
-  // Auto-dismiss success dialog after 2.5s so it never ghost-block clicks
-  useEffect(() => {
-    if (showSaveSuccessDialog) {
-      const t = setTimeout(() => setShowSaveSuccessDialog(false), 2500)
-      return () => clearTimeout(t)
-    }
-  }, [showSaveSuccessDialog])
-  const [showSaveErrorDialog, setShowSaveErrorDialog] = useState(false)
-  const [saveErrorMsg, setSaveErrorMsg] = useState("")
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null)
   const [uploadedFileName, setUploadedFileName] = useState("")
   const [formErrors, setFormErrors] = useState<Record<string, boolean>>({})
@@ -1153,6 +1142,9 @@ useEffect(() => {
       recipient: newRecord.recipient || undefined,
     })
     toast.success("Record added successfully!")
+    if (!settings.googleDriveConnected) {
+      setTimeout(() => toast("Connect Google Drive in Settings to back up your records."), 1200)
+    }
     // Reset form immediately — before Drive sync
     closeAddDrawer()
     // Build saved record for sync
@@ -1233,44 +1225,6 @@ useEffect(() => {
   }
 
   // ── Profile Save ────────────────────────────────────────────────────────
-  // handleSaveProfile is explicitly triggered by the user pressing "Save Profile".
-  // updateProfile already persists immediately via Zustand persist middleware,
-  // but we call it here explicitly so the save button gives real feedback.
-  const handleSaveProfile = useCallback(async () => {
-    if (!isHydrated) {
-      toast.error("App still loading. Please wait.")
-      return
-    }
-    // Demo mode: profile is read-only, show toast
-    if (isDemoMode) {
-      toast("[demo profile] profile details would not be saved")
-      return
-    }
-    setIsSavingProfile(true)
-    try {
-      // Flush latest nameInput to store before persisting to file
-      const nameVal = nameInputRef.current?.value || nameInput
-      updateProfile({ name: nameVal })
-      const res = await fetch('/api/profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profile: { ...profile, name: nameVal } }),
-      })
-      const data = await res.json()
-      if (!res.ok || !data.success) {
-        setSaveErrorMsg(data.error ?? 'Unknown error. Please try again.')
-        setShowSaveErrorDialog(true)
-      } else {
-        setShowSaveSuccessDialog(true)
-      }
-    } catch {
-      setSaveErrorMsg('Network error. Please check your connection and try again.')
-      setShowSaveErrorDialog(true)
-    } finally {
-      setIsSavingProfile(false)
-    }
-  }, [isHydrated, profile, nameInput, updateProfile])
-
   // ── Google Drive Mock ──────────────────────────────────────────────────
   const handleConnectDrive = async () => {
     const supabase = createSupabaseBrowserClient()
@@ -2172,6 +2126,8 @@ useEffect(() => {
       } else {
         updateProfile(updates as any)
       }
+      setProfileSavedMsg('Saved')
+      setTimeout(() => setProfileSavedMsg(''), 2000)
     }
 
     // EA Form data for this YA
@@ -2292,16 +2248,20 @@ useEffect(() => {
               className="hidden"
               onChange={handleEAFormUpload}
             />
-            {/* Mobile-friendly debug feedback */}
+            {/* EA Form status feedback */}
             {eaFormDebug && (
               <div className={cn(
-                "rounded-lg px-3 py-2 text-sm font-medium transition-all",
+                "flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-all",
                 eaFormDebug.startsWith('✅') && "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800",
                 eaFormDebug.startsWith('⚠️') && "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800",
                 eaFormDebug.startsWith('❌') && "bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300 border border-red-200 dark:border-red-800",
                 eaFormDebug.startsWith('🔍') && "bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300 border border-blue-200 dark:border-blue-800"
               )}>
-                {eaFormDebug}
+                {eaFormDebug.startsWith('🔍') && <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin" />}
+                {eaFormDebug.startsWith('✅') && <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />}
+                {eaFormDebug.startsWith('⚠️') && <AlertTriangle className="h-3.5 w-3.5 shrink-0" />}
+                {eaFormDebug.startsWith('❌') && <AlertTriangle className="h-3.5 w-3.5 shrink-0" />}
+                <span>{eaFormDebug.replace(/^[🔍✅⚠️❌]\s*/, '')}</span>
               </div>
             )}
 
@@ -2455,23 +2415,12 @@ useEffect(() => {
           </CardContent>
         </Card>
 
-        <Button
-          className="h-12 w-full bg-primary hover:bg-primary/90 text-base font-semibold"
-          onClick={handleSaveProfile}
-          disabled={isSavingProfile}
-        >
-          {isSavingProfile ? (
-            <>
-              <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-              Saving…
-            </>
-          ) : (
-            <>
-              <CheckCircle2 className="mr-2 h-4 w-4" />
-              Save Profile
-            </>
-          )}
-        </Button>
+        {profileSavedMsg && (
+          <p className="flex items-center justify-center gap-1.5 text-sm font-medium text-emerald-600 dark:text-emerald-400 transition-all">
+            <CheckCircle2 className="h-4 w-4" />
+            {profileSavedMsg}
+          </p>
+        )}
 
         {/* Sign Out — red button, same style as Save Profile */}
         <button
@@ -2589,76 +2538,6 @@ useEffect(() => {
           </Card>
         </div>
 
-        {/* Drive Sync Diagnostics */}
-        <div className="space-y-3">
-          <button
-            onClick={() => setSyncDiagnosticsOpen(o => !o)}
-            className="flex w-full items-center gap-2.5 px-1 text-left"
-          >
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-100 dark:bg-emerald-900/40">
-              <AlertTriangle className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-            </div>
-            <h2 className="font-semibold text-foreground">Drive Sync Diagnostics</h2>
-            <ChevronRight className={cn("h-4 w-4 text-muted-foreground transition-transform", syncDiagnosticsOpen && "rotate-90")} />
-          </button>
-
-          {syncDiagnosticsOpen && (
-            <Card className="overflow-hidden border-0 shadow-sm ring-1 ring-border">
-              <CardContent className="space-y-4 p-4">
-                {/* Debug state strip */}
-                <div className="rounded-lg bg-muted/60 px-3 py-2 font-mono text-xs text-muted-foreground">
-                  <span className={cn("font-semibold", !isDemoMode ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400")}>
-                    {isDemoMode ? "Demo: true" : "Demo: false"}
-                  </span>
-                  <span className="mx-2 text-muted-foreground/40">|</span>
-                  <span className={cn("font-semibold", settings.googleDriveConnected ? "text-emerald-600 dark:text-emerald-400" : "text-red-500")}>
-                    {settings.googleDriveConnected ? "Drive Connected: true" : "Drive Connected: false"}
-                  </span>
-                  <span className="mx-2 text-muted-foreground/40">|</span>
-                  <span className={cn("font-semibold", driveFolderIds.manifestFileIds && driveFolderIds.categoryFolderIds ? "text-emerald-600 dark:text-emerald-400" : "text-red-500")}>
-                    {driveFolderIds.manifestFileIds && driveFolderIds.categoryFolderIds ? "Manifest IDs: loaded" : "Manifest IDs: missing"}
-                  </span>
-                </div>
-
-                {/* Sync log */}
-                {syncLog.length === 0 ? (
-                  <p className="text-sm text-muted-foreground italic py-2">No sync activity yet. Trigger a save/update to see events here.</p>
-                ) : (
-                  <ScrollArea className="max-h-48 rounded-lg bg-muted/30 p-2 font-mono text-xs">
-                    <div className="space-y-0.5">
-                      {[...syncLog].reverse().map((entry, i) => (
-                        <div key={i} className={cn(
-                          "flex items-center gap-2 py-0.5",
-                          entry.status === 'pending' && "text-muted-foreground",
-                          entry.status === 'success' && "text-emerald-600 dark:text-emerald-400",
-                          entry.status === 'error' && "text-red-500"
-                        )}>
-                          <span className="shrink-0 opacity-60">[{entry.time}]</span>
-                          <span>{entry.action}</span>
-                          <span className="shrink-0">
-                            {entry.status === 'pending' && '→ ⟳ pending'}
-                            {entry.status === 'success' && '→ ✓ success'}
-                            {entry.status === 'error' && `→ ✗ error: ${entry.detail || ''}`}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </ScrollArea>
-                )}
-
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8 w-full text-xs"
-                  onClick={() => setSyncLog([])}
-                >
-                  Clear Log
-                </Button>
-              </CardContent>
-            </Card>
-          )}
-        </div>
-
         {/* Notifications */}
         <div className="space-y-3">
           <div className="flex items-center gap-2.5 px-1">
@@ -2672,9 +2551,7 @@ useEffect(() => {
               {[
                 ["Tax deadline reminders", "taxDeadlineReminders", "Get notified before filing deadlines"],
                 ["Low relief utilization alerts", "lowReliefAlerts", "Alert when reliefs are underutilized"],
-                ["Weekly summary", "weeklySummary", "Receive weekly relief summary"],
-                ["New LHDN updates", "lhdnUpdates", "Get notified about tax law changes"],
-              ].map(([label, key, desc], i, arr) => (
+              ].map(([label, key, desc], i) => (
                 <div key={key} className={`${i > 0 ? "border-t border-border/60" : ""}`}>
                   <div className="flex min-h-[56px] items-center justify-between gap-3 px-5 py-3 transition-colors hover:bg-muted/30">
                     <div className="min-w-0 flex-1">
@@ -2689,36 +2566,6 @@ useEffect(() => {
                   </div>
                 </div>
               ))}
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Security */}
-        <div className="space-y-3">
-          <div className="flex items-center gap-2.5 px-1">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-100 dark:bg-emerald-900/40">
-              <Shield className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-            </div>
-            <h2 className=" font-semibold text-foreground">Security</h2>
-          </div>
-          <Card className="overflow-hidden border-0 shadow-sm ring-1 ring-border">
-            <CardContent className="p-5">
-              <div className="flex min-h-[48px] items-center justify-between">
-                <div className="flex items-center gap-3.5">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-emerald-50 to-emerald-100 dark:from-emerald-950/40 dark:to-emerald-900/30">
-                    <Fingerprint className="h-4.5 w-4.5 text-emerald-600 dark:text-emerald-400" />
-                  </div>
-                  <div>
-                    <p className=" font-medium text-foreground">Biometric Lock</p>
-                    <p className=" text-muted-foreground">Face ID / Fingerprint</p>
-                  </div>
-                </div>
-                <Switch
-                  checked={settings.biometricLock}
-                  onCheckedChange={(v) => updateSettings({ biometricLock: v })}
-                  className="shrink-0"
-                />
-              </div>
             </CardContent>
           </Card>
         </div>
@@ -2748,7 +2595,6 @@ useEffect(() => {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="en">English</SelectItem>
-                    <SelectItem value="ms">Bahasa Melayu</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -2878,17 +2724,20 @@ useEffect(() => {
               </div>
               <div className="flex flex-col gap-1.5">
                 {[
-                  "Privacy Policy",
-                  "Terms of Service",
-                  "LHDN Official Website",
-                ].map((item) => (
-                  <button
-                    key={item}
+                  { label: "Privacy Policy", href: "/privacy" },
+                  { label: "Terms of Service", href: "/terms" },
+                  { label: "LHDN Official Website", href: "https://www.hasil.gov.my" },
+                ].map(({ label, href }) => (
+                  <a
+                    key={label}
+                    href={href}
+                    target={href.startsWith("http") ? "_blank" : undefined}
+                    rel={href.startsWith("http") ? "noopener noreferrer" : undefined}
                     className="flex min-h-[44px] items-center justify-between rounded-xl px-3.5 text-sm text-foreground transition-all hover:bg-muted/60 active:scale-[0.99]"
                   >
-                    <span>{item}</span>
+                    <span>{label}</span>
                     <ExternalLink className="h-4 w-4 text-muted-foreground" />
-                  </button>
+                  </a>
                 ))}
               </div>
             </CardContent>
@@ -3621,65 +3470,6 @@ useEffect(() => {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Profile Save Success Dialog */}
-      <AlertDialog open={showSaveSuccessDialog} onOpenChange={setShowSaveSuccessDialog}>
-        <AlertDialogContent className="max-w-sm">
-          <AlertDialogHeader>
-            <AlertDialogTitle className="flex items-center gap-2 text-emerald-600">
-              <CheckCircle2 className="h-5 w-5" /> Profile Saved
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              Your profile details have been saved to file successfully.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogAction onClick={() => setShowSaveSuccessDialog(false)}>
-              OK
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Profile Save Error Dialog */}
-      <AlertDialog open={showSaveErrorDialog} onOpenChange={setShowSaveErrorDialog}>
-        <AlertDialogContent className="max-w-sm">
-          <AlertDialogHeader>
-            <AlertDialogTitle className="flex items-center gap-2 text-red-600">
-              <AlertTriangle className="h-5 w-5" /> Save Failed
-            </AlertDialogTitle>
-            <AlertDialogDescription>{saveErrorMsg}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogAction onClick={() => setShowSaveErrorDialog(false)}>
-              OK
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Drive Connect Prompt Dialog */}
-      <AlertDialog open={showDriveConnectPrompt} onOpenChange={setShowDriveConnectPrompt}>
-        <AlertDialogContent className="max-w-sm">
-          <AlertDialogHeader>
-            <AlertDialogTitle className="flex items-center gap-2 text-blue-600">
-              <HardDrive className="h-5 w-5" /> Connect Google Drive
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              Please connect Google Drive first before adding records.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogAction onClick={() => {
-              setShowDriveConnectPrompt(false)
-              setActiveTab("settings")
-              router.push(pathname + "?tab=settings")
-            }}>
-              Go to Settings
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
       {/* ── Year of Assessment Picker ── */}
       <Dialog open={yearPickerOpen} onOpenChange={setYearPickerOpen}>
         <DialogContent className="max-w-xs">
@@ -3884,10 +3674,6 @@ useEffect(() => {
             onClick={() => {
               if (isDemoMode) {
                 toast("Cannot add records in demo mode")
-                return
-              }
-              if (!settings.googleDriveConnected) {
-                setShowDriveConnectPrompt(true)
                 return
               }
               setIsAddModalOpen(true)
