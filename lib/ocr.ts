@@ -22,6 +22,19 @@ export interface OCRResult {
   recipient: string             // "self" | "spouse" | "child" | "parent" | ""
   lineItems: string             // short description of items
   notes: string                 // invoice ID + SST/GST + time
+  // v2 OCR (FastAPI microservice) fields — optional, populated when ocr_v2=true
+  vendor?: string | null
+  tax_amount?: number | null
+  tax_type?: string | null
+  category?: string | null
+  invoice_number?: string | null
+  tin?: string | null
+  sst_registration_no?: string | null
+  document_type?: string | null
+  extraction_method?: string | null
+  needs_review?: boolean
+  confidence_band?: 'green' | 'amber' | 'red' | null
+  ocr_v2?: boolean
 }
 
 // ─── LHDN Tax Deduction Patterns (from receipt_processor.py) ────────────────

@@ -13,6 +13,10 @@ const floorRM = (n: number) => Math.floor(n)
 // ── OCR script path (relative to project root, works in dev + prod standalone) ──
 const OCR_SCRIPT = path.join(process.cwd(), 'scripts', 'ocr_rapid.py')
 
+// ── v2 FastAPI microservice (port 8001) ──────────────────────────────────────
+const OCR_SERVICE_URL = process.env.OCR_SERVICE_URL || 'http://127.0.0.1:8001'
+const OCR_SERVICE_TIMEOUT_MS = 30000
+
 /**
  * Run server-side RapidOCR via Python subprocess.
  * Returns parsed JSON output from ocr_rapid.py: { rawText, confidence, lines, ... }
@@ -40,6 +44,79 @@ async function runRapidOCR(imagePath: string, timeoutMs = 45000): Promise<{
     return JSON.parse(result.stdout)
   } catch (e) {
     throw new Error(`OCR JSON parse failed: ${e instanceof Error ? e.message : e}`)
+  }
+}
+
+/**
+ * v2 OCR: Proxy to FastAPI microservice on port 8001.
+ * Returns the full structured result with vendor/date/amount/tax/etc.
+ * Falls back to v1 (runRapidOCR + client parser) if v2 service is down.
+ */
+async function runRapidOCRv2(imagePath: string, timeoutMs = OCR_SERVICE_TIMEOUT_MS): Promise<{
+  rawText: string
+  confidence: number
+  lines: Array<{ text: string; confidence: number; bbox: number[][] }>
+  vendor?: string | null
+  date?: string | null
+  time?: string | null
+  amount?: number | null
+  tax_amount?: number | null
+  tax_type?: string | null
+  currency?: string | null
+  category?: string | null
+  invoice_number?: string | null
+  tin?: string | null
+  sst_registration_no?: string | null
+  document_type?: string | null
+  extraction_method?: string | null
+  needs_review?: boolean
+  confidence_band?: string
+  elapsed_ms?: number
+}> {
+  const { readFile } = await import('fs/promises')
+  const buffer = await readFile(imagePath)
+  const blob = new Blob([buffer], { type: 'image/jpeg' })
+  const form = new FormData()
+  form.append('file', blob, path.basename(imagePath))
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const res = await fetch(`${OCR_SERVICE_URL}/ocr`, {
+      method: 'POST',
+      body: form,
+      signal: controller.signal,
+    })
+    clearTimeout(timeout)
+    if (!res.ok) {
+      throw new Error(`OCR service HTTP ${res.status}`)
+    }
+    const data = (await res.json()) as Record<string, unknown>
+    return {
+      rawText: String(data.raw_text || data.rawText || ''),
+      confidence: Number(data.confidence || 0),
+      lines: (data.lines as any) || [],
+      vendor: data.vendor as string | null ?? null,
+      date: data.date as string | null ?? null,
+      time: data.time as string | null ?? null,
+      amount: data.amount as number | null ?? null,
+      tax_amount: data.tax_amount as number | null ?? null,
+      tax_type: data.tax_type as string | null ?? null,
+      currency: data.currency as string | null ?? null,
+      category: data.category as string | null ?? null,
+      invoice_number: data.invoice_number as string | null ?? null,
+      tin: data.tin as string | null ?? null,
+      sst_registration_no: data.sst_registration_no as string | null ?? null,
+      document_type: data.document_type as string | null ?? null,
+      extraction_method: data.extraction_method as string | null ?? null,
+      needs_review: Boolean(data.needs_review),
+      confidence_band: data.confidence_band as string | undefined,
+      elapsed_ms: Number(data.elapsed_ms || 0),
+    }
+  } catch (e) {
+    clearTimeout(timeout)
+    throw new Error(`OCR v2 service failed: ${e instanceof Error ? e.message : e}`)
   }
 }
 
@@ -589,13 +666,23 @@ export async function POST(request: NextRequest) {
 
     } else {
       // ── Photo: use RapidOCR directly ───────────────────────────────────────
-      let parsed: { rawText: string; confidence: number; lines?: unknown[] }
+      let parsed: { rawText: string; confidence: number; lines?: unknown[]; [k: string]: unknown }
+      let usedV2 = false
+      // Try v2 (FastAPI service) first — richer extraction (vendor, date, amount, SST, TIN, etc.)
       try {
-        parsed = await runRapidOCR(tmpPath)
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : 'OCR processing failed'
-        console.error('[OCR] photo failed:', msg)
-        return NextResponse.json({ error: msg }, { status: 500 })
+        parsed = await runRapidOCRv2(tmpPath)
+        usedV2 = true
+        console.log('[OCR] v2 service succeeded')
+      } catch (v2Err) {
+        // Fall back to v1 (subprocess + client-side parser)
+        console.warn('[OCR] v2 service failed, falling back to v1:', v2Err instanceof Error ? v2Err.message : v2Err)
+        try {
+          parsed = await runRapidOCR(tmpPath)
+        } catch (v1Err) {
+          const msg = v1Err instanceof Error ? v1Err.message : 'OCR processing failed'
+          console.error('[OCR] photo failed (v1 fallback):', msg)
+          return NextResponse.json({ error: msg }, { status: 500 })
+        }
       }
 
       rawText = parsed.rawText || ''
@@ -612,25 +699,40 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // Photo OCR returns rawText only — client (lib/ocr.ts) parses vendor/amount/date/etc.
+      // Photo OCR returns rawText + (when v2) structured fields
+      // Client (lib/ocr.ts) parses vendor/amount/date/etc. from rawText as fallback
       return NextResponse.json({
-        amount: null,
-        date: null,
-        merchant: 'Unknown Merchant',
+        // v2 structured fields (when usedV2)
+        vendor: usedV2 ? (parsed.vendor ?? null) : null,
+        date: usedV2 ? (parsed.date ?? null) : null,
+        time: usedV2 ? (parsed.time ?? null) : null,
+        amount: usedV2 ? (parsed.amount ?? null) : null,
+        tax_amount: usedV2 ? (parsed.tax_amount ?? null) : null,
+        tax_type: usedV2 ? (parsed.tax_type ?? null) : null,
+        currency: usedV2 ? (parsed.currency ?? 'MYR') : 'MYR',
+        category: usedV2 ? (parsed.category ?? null) : null,
+        invoice_number: usedV2 ? (parsed.invoice_number ?? null) : null,
+        tin: usedV2 ? (parsed.tin ?? null) : null,
+        sst_registration_no: usedV2 ? (parsed.sst_registration_no ?? null) : null,
+        document_type: usedV2 ? (parsed.document_type ?? null) : null,
+        extraction_method: usedV2 ? (parsed.extraction_method ?? null) : null,
+        needs_review: usedV2 ? Boolean(parsed.needs_review) : false,
+        confidence_band: usedV2 ? (parsed.confidence_band ?? null) : null,
+        // Legacy aliases (dashboard reads these)
+        merchant: usedV2 ? (parsed.vendor ?? 'Unknown Merchant') : 'Unknown Merchant',
+        invoiceNumber: usedV2 ? (parsed.invoice_number ?? null) : null,
+        taxAmount: usedV2 ? (parsed.tax_amount ?? null) : null,
+        suggestedCategory: usedV2 ? (parsed.category ?? 'lifestyle') : 'lifestyle',
         description: '',
-        suggestedCategory: 'lifestyle',
-        invoiceNumber: null,
-        taxAmount: null,
         lhdNCategory: '',
         recipient: '',
         rawText,
         confidence: parsed.confidence ?? 0,
-        time: null,
-        currency: 'MYR',
         taxExempt: false,
         lineItems: '',
         notes: '',
         eaFormData,
+        ocr_v2: usedV2,
       })
     }
 
