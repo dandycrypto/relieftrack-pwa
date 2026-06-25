@@ -7,6 +7,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
+import { extractDriveToken, isDriveAuthError } from '@/lib/api-drive-auth'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -19,16 +20,7 @@ const CATEGORIES = [
   'lifestyle', 'epf_insurance', 'housing_loan',
 ]
 
-// ── Supabase setup (lazy import to avoid build issues) ─────────────────────────
 
-function getSupabaseAdmin() {
-  const { createServerClient } = require('@supabase/ssr')
-  // We need a way to create a server client with service role
-  // Since this is an API route, we use the public anon key with
-  // the user's session cookie, and access auth.identities via
-  // a direct connection with service role key
-  return null
-}
 
 // ── Drive API helpers (all server-side) ────────────────────────────────────
 
@@ -197,49 +189,10 @@ export async function GET(request: NextRequest) {
     const action = searchParams.get('action')
     const taxYear = parseInt(searchParams.get('taxYear') || '') || new Date().getFullYear()
 
-    // Get Google access token — client sends provider_token via Authorization header
-    const authHeader = request.headers.get('Authorization')
-    let accessToken: string | null = null
-
-    if (authHeader?.startsWith('Bearer ')) {
-      // Client passed provider_token directly (preferred method)
-      accessToken = authHeader.slice(7)
-    } else {
-      // Fallback: get user from session cookie, then try identities table
-      const { createServerClient } = require('@supabase/ssr')
-      const supabase = createServerClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        {
-          cookies: {
-            get: (name: string) => request.cookies.get(name)?.value,
-            set: () => {},
-            remove: () => {},
-          },
-        }
-      )
-      const { data: { user }, error: authError } = await supabase.auth.getUser()
-      if (authError || !user) {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-      }
-      const { createClient } = require('@supabase/supabase-js')
-      const admin = createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.SUPABASE_SERVICE_ROLE_KEY!,
-        { auth: { autoRefreshToken: false, persistSession: false } }
-      )
-      const { data: identityData } = await admin
-        .from('identities')
-        .select('identity_data')
-        .eq('user_id', user.id)
-        .eq('provider', 'google')
-        .single()
-      const idData = identityData?.identity_data as Record<string, any> || {}
-      accessToken = idData?.access_token || idData?.provider_access_token || null
-      if (!accessToken) {
-        return NextResponse.json({ error: 'Google access token not found. Please sign out and sign in again.' }, { status: 400 })
-      }
-    }
+    // Get Google access token via shared helper
+    const authResult = await extractDriveToken(request)
+    if (isDriveAuthError(authResult)) return authResult.response
+    const accessToken = authResult.accessToken
 
     // Handle actions
     if (action === 'folderSetup') {
@@ -356,44 +309,10 @@ export async function POST(request: NextRequest) {
     const body = await request.json()
     const { action, record, recordId, categoryFolderIds, manifestFileIds } = body
 
-    const authHeader = request.headers.get('Authorization')
-    let accessToken: string | null = null
-
-    if (authHeader?.startsWith('Bearer ')) {
-      accessToken = authHeader.slice(7)
-    } else {
-      const { createServerClient } = require('@supabase/ssr')
-      const supabase = createServerClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        {
-          cookies: {
-            get: (name: string) => request.cookies.get(name)?.value,
-            set: () => {},
-            remove: () => {},
-          },
-        }
-      )
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-      const { createClient } = require('@supabase/supabase-js')
-      const admin = createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.SUPABASE_SERVICE_ROLE_KEY!,
-        { auth: { autoRefreshToken: false, persistSession: false } }
-      )
-      const { data: identityData } = await admin
-        .from('identities')
-        .select('identity_data')
-        .eq('user_id', user.id)
-        .eq('provider', 'google')
-        .single()
-      const idData = identityData?.identity_data as Record<string, any> || {}
-      accessToken = idData?.access_token || idData?.provider_access_token || null
-      if (!accessToken) {
-        return NextResponse.json({ error: 'Google access token not found' }, { status: 400 })
-      }
-    }
+    // Get Google access token via shared helper
+    const authResult = await extractDriveToken(request)
+    if (isDriveAuthError(authResult)) return authResult.response
+    const accessToken = authResult.accessToken
 
     if (!['saveRecord', 'updateRecord', 'deleteRecord'].includes(action)) {
       return NextResponse.json({ error: 'Invalid action' }, { status: 400 })

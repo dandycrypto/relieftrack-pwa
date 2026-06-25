@@ -7,6 +7,7 @@
 
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { floorRM } from '@/lib/ocr-parsers'
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -35,7 +36,7 @@ export interface ReliefCategory {
   subcategories?: ReliefSubCategory[]
 }
 
-export const floorRM = (amount: number): number => Math.floor(amount)
+export { floorRM }
 
 export interface Record {
   id: string
