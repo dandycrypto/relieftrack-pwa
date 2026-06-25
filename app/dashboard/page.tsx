@@ -107,6 +107,7 @@ import {
   DrawerFooter,
 } from "@/components/ui/drawer"
 import { cn } from "@/lib/utils"
+import { OnboardingWizard } from "@/components/OnboardingWizard"
 import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, calculateTax, calculateNetTaxBalance, type Record as ReliefRecord } from "@/store"
 import { createSupabaseBrowserClient } from "@/utils/supabase/client"
 import { performOCR, type OcrResult } from "@/lib/ocr"
@@ -2793,6 +2794,10 @@ useEffect(() => {
   return (
     <div className="flex h-[100svh] w-full flex-col bg-background">
 
+      {/* First-run onboarding wizard — shown once, skipped for demo and returning users */}
+      {isHydrated && !settings.onboardingComplete && records.length === 0 && !isDemoMode && (
+        <OnboardingWizard />
+      )}
 
       {/* Main Content */}
       <main className="flex-1 pt-2 pb-[env(safe-area-inset-bottom)] w-full overflow-y-auto overscroll-contain">
