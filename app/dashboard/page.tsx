@@ -2462,7 +2462,7 @@ useEffect(() => {
                         </div>
                       </div>
 
-                      {/* Amount + Verified + Sync */}
+                      {/* Amount + Verified + Evidence + Sync */}
                       <div className="flex items-center gap-2 shrink-0 min-w-0">
                         <span className="text-sm font-semibold whitespace-nowrap">{formatRM(record.amount)}</span>
                         {record.status === 'verified' ? (
@@ -2470,6 +2470,11 @@ useEffect(() => {
                         ) : (
                           <Clock className="h-3.5 w-3.5 text-amber-500 shrink-0" aria-label="Pending review" />
                         )}
+                        {record.receiptUrl ? (
+                          <Shield className="h-3 w-3 text-emerald-500 shrink-0" aria-label="Receipt attached — audit ready" />
+                        ) : record.category !== 'individual' ? (
+                          <AlertCircle className="h-3 w-3 text-red-400 shrink-0" aria-label="No receipt — not audit ready" />
+                        ) : null}
                         {record.syncedToDrive ? (
                           <Cloud className="h-3 w-3 text-sky-500 shrink-0" aria-label="Synced to Google Drive" />
                         ) : (
