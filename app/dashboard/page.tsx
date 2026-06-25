@@ -106,7 +106,6 @@ import {
   DrawerClose,
   DrawerFooter,
 } from "@/components/ui/drawer"
-import { OcrConfidenceBadge } from '@/components/OcrConfidenceBadge'
 import { cn } from "@/lib/utils"
 import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, calculateTax, calculateNetTaxBalance, type Record as ReliefRecord } from "@/store"
 import { createSupabaseBrowserClient } from "@/utils/supabase/client"
@@ -575,7 +574,6 @@ useEffect(() => {
   const [isDriveLoading, setIsDriveLoading] = useState(false)
   const [driveStorageInfo, setDriveStorageInfo] = useState<{ used: number; total: number } | null>(null)
   const [syncLog, setSyncLog] = useState<Array<{ time: string; action: string; status: 'pending' | 'success' | 'error'; detail?: string }>>([])
-  const [syncDiagnosticsOpen, setSyncDiagnosticsOpen] = useState(false)
 
   // Fetch Google Drive storage quota via server-side API route
   // Calculate local records size as fallback when Drive storage info is unavailable
@@ -950,8 +948,7 @@ useEffect(() => {
       setOcrResult(result)
       setIsVerifying(false)
       setVerifyResult(null)
-      // Show review dialog — user confirms extracted data before form
-      setReviewData({
+      const reviewPayload = {
         vendor: result.vendor || '',
         amount: result.amount ? String(Math.round(result.amount)) : '',
         date: result.date || `${settings.defaultTaxYear}-${new Date().toISOString().slice(5, 10)}`,
@@ -960,8 +957,31 @@ useEffect(() => {
         confidence: result.confidence,
         rawText: result.raw_text,
         category: result.category || 'lifestyle',
-      })
-      setShowOcrReview(true)
+      }
+      // High-confidence auto-save: skip review screen if ≥85% and data is complete
+      if (result.confidence >= 85 && reviewPayload.vendor && reviewPayload.amount) {
+        addRecord({
+          category: reviewPayload.category,
+          date: reviewPayload.date,
+          amount: parseFloat(reviewPayload.amount),
+          merchant: reviewPayload.vendor,
+          status: 'verified',
+          receiptUrl: receiptPreview || undefined,
+          receiptFileName: uploadedFileName || undefined,
+          invoiceNumber: reviewPayload.invoiceNumber || undefined,
+        })
+        toast.success("Saved — tap to review", {
+          description: `${reviewPayload.vendor} · RM ${reviewPayload.amount}`,
+          duration: 3000,
+        })
+        if (!settings.googleDriveConnected) {
+          setTimeout(() => toast("Connect Google Drive in Settings to back up your records."), 1500)
+        }
+        closeAddDrawer()
+      } else {
+        setReviewData(reviewPayload)
+        setShowOcrReview(true)
+      }
     } catch (err) {
       console.error("OCR failed:", err)
       toast.error("OCR failed. Please enter details manually.")
@@ -1165,6 +1185,26 @@ useEffect(() => {
     // Fire-and-forget Drive sync
     syncToDrive('saveRecord', savedRecord as ReliefRecord)
     setTimeout(() => setIsSaving(false), 300)
+  }
+
+  const handleSaveFromReview = () => {
+    if (!reviewData) return
+    if (!reviewData.vendor.trim() || !reviewData.amount) return
+    addRecord({
+      category: reviewData.category,
+      date: reviewData.date,
+      amount: parseFloat(reviewData.amount),
+      merchant: reviewData.vendor,
+      status: 'verified',
+      receiptUrl: receiptPreview || undefined,
+      receiptFileName: uploadedFileName || undefined,
+      invoiceNumber: reviewData.invoiceNumber || undefined,
+    })
+    toast.success("Record added successfully!")
+    if (!settings.googleDriveConnected) {
+      setTimeout(() => toast("Connect Google Drive in Settings to back up your records."), 1200)
+    }
+    closeAddDrawer()
   }
 
   const closeAddDrawer = () => {
@@ -2799,194 +2839,103 @@ useEffect(() => {
 
           {/* ── OCR Review Dialog ── */}
           {showOcrReview && reviewData && (
-            <div className="px-4 pb-4">
-              {/* Receipt image thumbnail */}
+            <div className="space-y-4 px-4 pb-4">
+              {/* Receipt thumbnail */}
               {receiptPreview && (
-                <div className="mb-3">
-                  <img src={receiptPreview} alt="Receipt" className="h-20 w-full object-contain rounded-lg border border-gray-200 dark:border-gray-700" />
-                </div>
+                <img
+                  src={receiptPreview}
+                  alt="Receipt"
+                  className="h-20 w-full rounded-xl border border-border object-contain"
+                />
               )}
-              
-              <div className="rounded-xl border-2 border-blue-200 bg-blue-50 dark:bg-blue-950/20 p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <FileText className="h-5 w-5 text-blue-600" />
-                  <h3 className="font-semibold text-blue-900 dark:text-blue-300">Verify Extracted Data</h3>
-                  <span className="ml-auto text-xs text-blue-600 bg-blue-100 dark:bg-blue-900 px-2 py-0.5 rounded-full">
-                    {Math.round(reviewData.confidence * 100)}% confidence
-                  </span>
+
+              {/* 3 primary fields */}
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label className="text-sm font-medium">Merchant</Label>
+                  <Input
+                    value={reviewData.vendor}
+                    onChange={(e) => setReviewData({ ...reviewData, vendor: e.target.value })}
+                    className="h-11 font-medium"
+                    placeholder="Merchant name"
+                  />
                 </div>
-                
-                <div className="space-y-3">
-                  {/* Merchant */}
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-blue-700 dark:text-blue-400 uppercase tracking-wide">Merchant / Shop</Label>
-                    <Input
-                      value={reviewData.vendor}
-                      onChange={(e) => setReviewData({ ...reviewData, vendor: e.target.value })}
-                      className="font-medium"
-                      placeholder="Merchant name"
-                    />
-                  </div>
-                  
-                  {/* Amount */}
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-blue-700 dark:text-blue-400 uppercase tracking-wide">Amount (RM)</Label>
-                    <Input
-                      type="number"
-                      value={reviewData.amount}
-                      onChange={(e) => setReviewData({ ...reviewData, amount: e.target.value })}
-                      className="font-medium"
-                      placeholder="0.00"
-                    />
-                  </div>
-                  
-                  {/* Date */}
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-blue-700 dark:text-blue-400 uppercase tracking-wide">Date</Label>
-                    <Input
-                      type="date"
-                      value={reviewData.date}
-                      onChange={(e) => setReviewData({ ...reviewData, date: e.target.value })}
-                    />
-                  </div>
-                  
-                  {/* Invoice Number */}
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-blue-700 dark:text-blue-400 uppercase tracking-wide">Invoice / Receipt No.</Label>
-                    <Input
-                      value={reviewData.invoiceNumber}
-                      onChange={(e) => setReviewData({ ...reviewData, invoiceNumber: e.target.value })}
-                      placeholder="Optional"
-                    />
-                  </div>
-                  
-                  {/* Category hint */}
-                  <div className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400">
-                    <Tag className="h-3 w-3" />
-                    <span>Suggested: <span className="font-medium">{reviewData.category}</span></span>
-                  </div>
-                  
-                  {/* Mandatory field warning */}
-                  {(!reviewData.vendor.trim() || !reviewData.amount) && (
-                    <div className="flex items-center gap-2 text-xs text-amber-600 bg-amber-50 dark:bg-amber-950/30 rounded-lg px-3 py-2">
-                      <AlertCircle className="h-4 w-4 shrink-0" />
-                      <span>Merchant and amount are required — please fill in</span>
-                    </div>
-                  )}
+                <div className="space-y-1.5">
+                  <Label className="text-sm font-medium">Amount (RM)</Label>
+                  <Input
+                    type="number"
+                    value={reviewData.amount}
+                    onChange={(e) => setReviewData({ ...reviewData, amount: e.target.value })}
+                    className="h-11 font-medium"
+                    placeholder="0.00"
+                  />
                 </div>
-                
-                <div className="flex gap-2 mt-4">
-                  <Button
-                    variant="outline"
-                    className="flex-1"
-                    onClick={() => {
-                      setShowOcrReview(false)
-                      setShowOCRForm(false)
-                      setIsProcessing(false)
-                      setOcrResult(null)
-                      setReceiptPreview(null)
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    className="flex-1"
-                    onClick={() => {
-                      // Apply confirmed data to newRecord form and proceed
-                      setNewRecord(prev => ({
-                        ...prev,
-                        // lhdNCategory & recipient intentionally omitted — TODO: derive from raw_text or user input
-                        merchant: reviewData.vendor,
-                        amount: reviewData.amount,
-                        date: reviewData.date,
-                        invoiceNumber: reviewData.invoiceNumber,
-                        category: reviewData.category,
-                      }))
-                      setShowOcrReview(false)
-                      setShowOCRForm(true)
-                    }}
-                    disabled={!reviewData.vendor.trim() || !reviewData.amount}
-                  >
-                    Confirm & Continue →
-                  </Button>
+                <div className="space-y-1.5">
+                  <Label className="text-sm font-medium">Date</Label>
+                  <Input
+                    type="date"
+                    value={reviewData.date}
+                    onChange={(e) => setReviewData({ ...reviewData, date: e.target.value })}
+                    className="h-11"
+                  />
                 </div>
               </div>
 
-              {/* ── OCR Details — full extraction breakdown ── */}
-              {ocrResult && (
-                <details className="mt-3 rounded-xl border border-blue-200 dark:border-blue-800 overflow-hidden">
-                  <summary className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-blue-700 dark:text-blue-400 cursor-pointer hover:bg-blue-50 dark:hover:bg-blue-950/30 select-none">
-                    <Info className="h-3.5 w-3.5 shrink-0" />
-                    View OCR Details
-                  </summary>
-                  <div className="px-3 pb-3 pt-1 space-y-3">
+              {/* Category chip + confidence */}
+              <div className="flex items-center justify-between">
+                <Select
+                  value={reviewData.category}
+                  onValueChange={(v) => setReviewData({ ...reviewData, category: v })}
+                >
+                  <SelectTrigger className="h-8 w-auto gap-1.5 border-emerald-200 bg-emerald-50 px-2.5 text-xs text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
+                    <Tag className="h-3 w-3 shrink-0" />
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {RELIEF_CATEGORIES.map((c) => (
+                      <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="text-xs text-muted-foreground">
+                  {Math.round(reviewData.confidence * 100)}% confidence
+                </span>
+              </div>
 
-                    {/* Confidence + metadata row */}
-                    <div className="flex flex-wrap items-center gap-2">
-                      <OcrConfidenceBadge
-                        confidence={ocrResult.confidence}
-                        needsReview={ocrResult.needs_review}
-                      />
-                      {ocrResult.extraction_method && (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300">
-                          {ocrResult.extraction_method}
-                        </span>
-                      )}
-                      {ocrResult.document_type && ocrResult.document_type !== 'unknown' && (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                          {ocrResult.document_type}
-                        </span>
-                      )}
-                      {ocrResult.needs_review && (
-                        <span className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
-                          <AlertTriangle className="h-3 w-3" />
-                          Needs review
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Extracted fields grid */}
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                      {[
-                        ['Vendor', ocrResult.vendor],
-                        ['Amount', ocrResult.amount != null ? `RM ${ocrResult.amount.toFixed(2)}` : null],
-                        ['Date', ocrResult.date],
-                        ['Time', ocrResult.time],
-                        ['Category', ocrResult.category],
-                        ['Invoice #', ocrResult.invoice_number],
-                        ['TIN', ocrResult.tin],
-                        ['SST Reg.', ocrResult.sst_registration_no],
-                        ['Tax Amount', ocrResult.tax_amount != null ? `RM ${ocrResult.tax_amount.toFixed(2)}` : null],
-                        ['Tax Type', ocrResult.tax_type],
-                      ].filter(([, v]) => v != null && v !== '').map(([label, value]) => (
-                        <div key={label as string} className="flex gap-2">
-                          <span className="text-muted-foreground shrink-0">{label}:</span>
-                          <span className="font-medium truncate">{value as string}</span>
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Raw text */}
-                    <div>
-                      <p className="text-xs text-muted-foreground mb-1 font-medium uppercase tracking-wide">Raw OCR Text</p>
-                      <pre className="text-xs text-muted-foreground bg-muted/50 rounded-lg p-2 overflow-x-auto max-h-48 whitespace-pre-wrap font-mono">
-                        {ocrResult.raw_text || 'N/A'}
-                      </pre>
-                    </div>
-
-                  </div>
-                </details>
+              {/* Validation warning */}
+              {(!reviewData.vendor.trim() || !reviewData.amount) && (
+                <div className="flex items-center gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-600 dark:bg-amber-950/30 dark:text-amber-400">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>Merchant and amount are required</span>
+                </div>
               )}
 
-              {/* Raw OCR text — collapsible for debugging */}
-              <details className="mt-3">
-                <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
-                  Show raw OCR ({reviewData.rawText.length} chars)
-                </summary>
-                <pre className="mt-2 text-xs text-muted-foreground bg-muted/50 rounded-lg p-2 overflow-x-auto max-h-32 whitespace-pre-wrap">
-                  {reviewData.rawText.slice(0, 600)}
-                </pre>
-              </details>
+              {/* Action buttons */}
+              <Button
+                className="h-12 w-full text-base font-semibold"
+                onClick={handleSaveFromReview}
+                disabled={!reviewData.vendor.trim() || !reviewData.amount}
+              >
+                Save Record
+              </Button>
+              <Button
+                variant="ghost"
+                className="h-10 w-full text-sm text-muted-foreground"
+                onClick={() => {
+                  setNewRecord(prev => ({
+                    ...prev,
+                    merchant: reviewData.vendor,
+                    amount: reviewData.amount,
+                    date: reviewData.date,
+                    invoiceNumber: reviewData.invoiceNumber,
+                    category: reviewData.category,
+                  }))
+                  setShowOcrReview(false)
+                  setShowOCRForm(true)
+                }}
+              >
+                Edit Details ›
+              </Button>
             </div>
           )}
 
