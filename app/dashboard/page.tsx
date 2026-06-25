@@ -1533,28 +1533,39 @@ useEffect(() => {
     }
   }
 
+  const getAuditTaxSummary = () => {
+    const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+    const eaData = settings.eaFormByYear?.[taxYear]
+    const grossIncome = eaData?.grossIncome ?? profile.grossIncome ?? 0
+    const epf = eaData?.epf ?? 0
+    const socso = eaData?.socso ?? 0
+    const pcb = eaData?.pcb ?? 0
+    const chargeableIncome = Math.max(0, grossIncome - Math.min(epf, 4000) - 9000 - totalClaimed)
+    const estimatedTax = 0 // computed in audit-export
+    return { grossIncome, epf, socso, pcb, reliefTotal: totalClaimed, chargeableIncome, estimatedTax, taxAfterRebate: estimatedTax, balance: estimatedTax - pcb }
+  }
+
   const handleExportAuditExcel = async () => {
     try {
       const { generateAuditExcel, downloadAuditExcel } = await import('@/lib/audit-export')
       const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
       const yearRecords = records.filter((r) => r.date.startsWith(String(taxYear)))
-      const eaData = settings.eaFormByYear?.[taxYear]
-      const taxSummary = {
-        grossIncome: eaData?.grossIncome ?? profile.grossIncome ?? 0,
-        epf: eaData?.epf ?? 0,
-        socso: eaData?.socso ?? 0,
-        pcb: eaData?.pcb ?? 0,
-        reliefTotal: totalClaimed,
-        chargeableIncome: Math.max(0, (eaData?.grossIncome ?? profile.grossIncome ?? 0) - (eaData?.epf ?? 0) - (eaData?.socso ?? 0) - totalClaimed),
-        estimatedTax: 0,
-        taxAfterRebate: 0,
-        balance: 0,
-      }
-      const blob = await generateAuditExcel(yearRecords, profile, settings, reliefTotals, taxSummary, taxYear)
+      const blob = await generateAuditExcel(yearRecords, profile, settings, reliefTotals, getAuditTaxSummary(), taxYear)
       downloadAuditExcel(blob, taxYear)
       toast.success(`Audit Excel for YA ${taxYear} downloaded!`)
-    } catch (e) {
+    } catch {
       toast.error("Excel export failed.")
+    }
+  }
+
+  const handleDownloadAuditPack = async () => {
+    try {
+      const { downloadAuditPack } = await import('@/lib/audit-pack')
+      const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+      await downloadAuditPack({ records, profile, settings, reliefTotals, taxYear, taxSummary: getAuditTaxSummary() })
+      toast.success(`YA ${taxYear} audit pack downloaded (3 files)`)
+    } catch {
+      toast.error("Audit pack export failed.")
     }
   }
 
@@ -3298,6 +3309,13 @@ useEffect(() => {
                 onClick={handleExportAuditExcel}
               >
                 <Download className="h-4 w-4" /> Audit Summary Excel (4-sheet)
+              </Button>
+              <Button
+                variant="outline"
+                className="h-11 w-full justify-start gap-3 border-sky-200 px-4 font-medium text-sky-700 transition-all hover:border-sky-300 hover:bg-sky-50 dark:border-sky-900 dark:text-sky-400 dark:hover:bg-sky-950/30"
+                onClick={handleDownloadAuditPack}
+              >
+                <HardDrive className="h-4 w-4" /> Download Audit Pack (PDF + Excel + CSV)
               </Button>
               <Button
                 variant="outline"
