@@ -451,6 +451,107 @@ function extractVendor(text: string): string {
   }
 
   // Priority 3: fallback — first substantial text line
+  // Step A: prefer lines with company suffix (Sdn Bhd, Berhad, Bhd, Inc, LLC, etc.)
+  const COMPANY_SUFFIX = /\b(sdn\s*bhd|sdn\.?\s*bhd|berhad|bhd|inc\.?|llc|ltd\.?|pty|corp\.?|company|co\.?|group|holdings|enterprises|services|industries|trading|enterprise)\b/i
+  for (let i = 0; i < Math.min(40, lines.length); i++) {
+    const line = lines[i]
+    if (/\b(selangor|kuala lumpur|shah alam|sungei|sungai buloh|petaling|pj|cyberjaya|putrajaya|johor bahru|penang|melaka|ipoh|kedah|kelantan|terengganu|pahang|perak|sarawak|sabah|malaysia|40160|47000|50000)\b/i.test(line)) {
+      continue
+    }
+    if (/^[A-Z][A-Z\s]{3,30},$/.test(line)) {
+      continue
+    }
+    // Skip UI/browser noise (e.g. "Continue", "Submit", "Generate", button labels)
+    if (/^(continue|submit|generate|cancel|ok|yes|no|next|back|close|done|accept|decline|open|save|share|download|print|view|more|less)\b/i.test(line)) {
+      continue
+    }
+    // Skip lines that look like prompts/headings (start with capital, end with period, very long)
+    if (line.length > 100) {
+      continue
+    }
+    // Skip lines that start with very generic words that suggest UI text
+    if (/^(generative|ai|user|guidelines?|welcome|loading|please|thank|thank\s*you|introduction|summary|description|instructions?)\b/i.test(line)) {
+      continue
+    }
+    if (/\b(user\s*guidelines|generative\s*ai|continue\s*$|click\s*here|tap\s*to)\b/i.test(line)) {
+      continue
+    }
+    let skip = false
+    for (const p of VENDOR_SKIP_PATTERNS) {
+      if (p.test(line)) { skip = true; break }
+    }
+    if (skip) continue
+    const cleaned = line.replace(/[^\w\s\-&()/.]/g, ' ').trim()
+    if (cleaned.length < 2) continue
+    if (COMPANY_SUFFIX.test(line)) {
+      // Extract just the company name: pick highest-priority legal suffix, then walk back 1–4 brand words.
+      // Handles: "TT dotCom Sdn Bhd 197901008085(5z37-A)" → "TT dotCom Sdn Bhd"
+      //          "Deposit MYR0.00 Pay here TT dotCom Scn Bhd 197901008085 (52371-A)" → "TT dotCom Scn Bhd"
+      //          "Shell Malaysia Trading Sdn Bhd" → "Shell Malaysia Trading Sdn Bhd" (prefers "Sdn Bhd" over "Trading")
+      //          "Mydin Mohamed Holdings Berhad" → "Mydin Mohamed Holdings Berhad"
+      //          "7-Eleven Malaysia Sdn Bhd" → "7-Eleven Malaysia Sdn Bhd"
+      //          "AEON Co. (M) Bhd 12345-X" → "AEON Co. (M) Bhd"
+      const SUFFIX_PATTERNS: Array<[string, RegExp]> = [
+        ['sdn bhd', /\bsdn\.?\s*bhd\b/i],
+        ['berhad', /\bberhad\b/i],
+        ['bhd', /\bbhd\b/i],
+        ['inc.', /\binc\.?\b/i],
+        ['llc', /\bllc\b/i],
+        ['ltd.', /\bltd\.?\b/i],
+        ['corp.', /\bcorp\.?\b/i],
+        ['company', /\bcompany\b/i],
+        ['holdings', /\bholdings\b/i],
+        ['enterprises', /\benterprises?\b/i],
+        ['industries', /\bindustries\b/i],
+        ['trading', /\btrading\b/i],
+        ['services', /\bservices\b/i],
+        ['group', /\bgroup\b/i],
+        ['pty.', /\bpty\.?\b/i],
+      ]
+      const SUFFIX_PRIORITY: Record<string, number> = {
+        'sdn bhd': 100, 'berhad': 95, 'bhd': 90,
+        'inc.': 80, 'llc': 80, 'ltd.': 80, 'corp.': 80, 'company': 80,
+        'holdings': 60, 'enterprises': 55, 'industries': 50,
+        'trading': 45, 'services': 40, 'group': 35, 'pty.': 30,
+      }
+      let bestStart = -1
+      let bestSuffix = ''
+      let bestPriority = -1
+      for (const [name, pat] of SUFFIX_PATTERNS) {
+        const m = cleaned.match(pat)
+        if (m && m.index !== undefined) {
+          const pri = SUFFIX_PRIORITY[name] ?? 0
+          if (pri > bestPriority || (pri === bestPriority && m.index > bestStart)) {
+            bestStart = m.index
+            bestSuffix = m[0]
+            bestPriority = pri
+          }
+        }
+      }
+      if (bestStart >= 0) {
+        const before = cleaned.substring(0, bestStart).trim()
+        const words = before.split(/\s+/)
+        const junkWords = new Set(['pay', 'here', 'deposit', 'myr', 'rm', 'cash', 'bill', 'invoice', 'to', 'paying', 'at', 'from', 'the'])
+        const amountPat = /^(myr|rm|rp|usd|sgd|eur|gbp)?\s*\d+([.,]\d+)?$/i
+        const kept: string[] = []
+        for (let i = words.length - 1; i >= 0; i--) {
+          const w = words[i]
+          const wLower = w.toLowerCase().replace(/[,\.]+$/, '')
+          if (junkWords.has(wLower)) continue
+          if (amountPat.test(w)) continue
+          if (/^[^\w]+$/.test(w)) continue
+          kept.unshift(w)
+          if (kept.length >= 4) break
+        }
+        let companyName = (kept.length > 0 ? kept.join(' ') + ' ' + bestSuffix : cleaned.replace(/\s+\d.*$/, '').trim())
+          .replace(/\s+/g, ' ').trim()
+          .replace(/\s+\d.*$/, '').trim()
+        return companyName.slice(0, 80) || cleaned.slice(0, 80)
+      }
+      return cleaned.replace(/\s+\d.*$/, '').trim().slice(0, 80) || cleaned.slice(0, 80)
+    }
+  }
+  // Step B: fall back to first valid line (without company suffix requirement)
   for (let i = 0; i < Math.min(10, lines.length); i++) {
     const line = lines[i]
     if (/\b(selangor|kuala lumpur|shah alam|sungei|sungai buloh|petaling|pj|cyberjaya|putrajaya|johor bahru|penang|melaka|ipoh|kedah|kelantan|terengganu|pahang|perak|sarawak|sabah|malaysia|40160|47000|50000)\b/i.test(line)) {
@@ -459,13 +560,27 @@ function extractVendor(text: string): string {
     if (/^[A-Z][A-Z\s]{3,30},$/.test(line)) {
       continue
     }
-
+    if (/^(continue|submit|generate|cancel|ok|yes|no|next|back|close|done|accept|decline|open|save|share|download|print|view|more|less)\b/i.test(line)) {
+      continue
+    }
+    if (line.length > 60) {
+      continue
+    }
+    if (/^(generative|ai|user|guidelines?|welcome|loading|please|thank|thank\s*you|introduction|summary|description|instructions?)\b\b/i.test(line)) {
+      continue
+    }
+    if (/\b(user\s*guidelines|generative\s*ai|continue\s*$|click\s*here|tap\s*to)\b/i.test(line)) {
+      continue
+    }
+    // Skip lines that START with receipt/document keywords (not just equal to)
+    if (/^(invoice|inv\.?|receipt|receiptno|bill|doc|date|time|cashier|account|payment|change|balance|order|ref|reference)\b/i.test(line)) {
+      continue
+    }
     let skip = false
     for (const p of VENDOR_SKIP_PATTERNS) {
       if (p.test(line)) { skip = true; break }
     }
     if (skip) continue
-
     const cleaned = line.replace(/[^\w\s\-&()/.]/g, ' ').trim()
     if (cleaned.length >= 2) {
       return cleaned.slice(0, 80)
@@ -511,7 +626,11 @@ function extractInvoiceNumber(text: string): string | null {
   ]
   for (const pattern of patterns) {
     const match = text.match(pattern)
-    if (match && match[1]) return match[1].toUpperCase().slice(0, 30)
+    if (match && match[1]) {
+      // Strip common OCR-injected file format suffixes
+      const cleaned = match[1].replace(/(PDF|JPG|JPEG|PNG|IMAGE|FILE|IMG|PHOTO|PIC|DOC|TIFF|BMP)$/i, '').toUpperCase().slice(0, 30)
+      if (cleaned.length >= 4) return cleaned
+    }
   }
   return null
 }
@@ -785,13 +904,18 @@ export async function performOCR(
   // so the dashboard review form is pre-populated even with our minimal server response.
   if (result.rawText && result.rawText.length > 0) {
     const parsed = parseFromRawText(result.rawText)
-    // Server-provided fields win when present (e.g. EA form override, PDF with metadata)
-    result.amount = result.amount ?? parsed.amount
+    // Server-provided fields win when present and meaningful (e.g. EA form override, PDF with metadata).
+    // We only trust server values if they're not the default stub values (null/'lifestyle'/'Unknown Merchant').
+    const serverHasRealCategory = result.suggestedCategory && result.suggestedCategory !== 'lifestyle'
+    const serverHasRealMerchant = result.merchant && result.merchant !== 'Unknown Merchant'
+    const serverHasRealAmount = result.amount != null && result.amount > 0
+
+    result.amount = serverHasRealAmount ? result.amount : parsed.amount
     result.date = result.date ?? parsed.date
     result.time = result.time ?? parsed.time
-    result.merchant = result.merchant && result.merchant !== 'Unknown Merchant' ? result.merchant : parsed.merchant
+    result.merchant = serverHasRealMerchant ? result.merchant : parsed.merchant
     result.description = result.description || parsed.description
-    result.suggestedCategory = result.suggestedCategory || parsed.suggestedCategory
+    result.suggestedCategory = serverHasRealCategory ? result.suggestedCategory : parsed.suggestedCategory
     result.invoiceNumber = result.invoiceNumber ?? parsed.invoiceNumber
     result.taxAmount = result.taxAmount ?? parsed.taxAmount
     result.currency = result.currency || parsed.currency
