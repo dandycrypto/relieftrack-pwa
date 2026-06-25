@@ -106,8 +106,9 @@ import {
   DrawerClose,
   DrawerFooter,
 } from "@/components/ui/drawer"
-import { OcrConfidenceBadge } from '@/components/OcrConfidenceBadge'
 import { cn } from "@/lib/utils"
+import { OnboardingWizard } from "@/components/OnboardingWizard"
+import { QrScanner, type QrScanResult } from "@/components/QrScanner"
 import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, calculateTax, calculateNetTaxBalance, type Record as ReliefRecord } from "@/store"
 import { createSupabaseBrowserClient } from "@/utils/supabase/client"
 import { performOCR, type OcrResult } from "@/lib/ocr"
@@ -575,7 +576,6 @@ useEffect(() => {
   const [isDriveLoading, setIsDriveLoading] = useState(false)
   const [driveStorageInfo, setDriveStorageInfo] = useState<{ used: number; total: number } | null>(null)
   const [syncLog, setSyncLog] = useState<Array<{ time: string; action: string; status: 'pending' | 'success' | 'error'; detail?: string }>>([])
-  const [syncDiagnosticsOpen, setSyncDiagnosticsOpen] = useState(false)
 
   // Fetch Google Drive storage quota via server-side API route
   // Calculate local records size as fallback when Drive storage info is unavailable
@@ -735,6 +735,7 @@ useEffect(() => {
       fetchDriveStorage()
     }
   }, [activeTab, settings.googleDriveConnected, fetchDriveStorage])
+  const [showQrScanner, setShowQrScanner] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [ocrProgress, setOcrProgress] = useState(0)
   const [showOCRForm, setShowOCRForm] = useState(false)
@@ -769,11 +770,9 @@ useEffect(() => {
   const [mounted, setMounted] = useState(false)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [deleteOneId, setDeleteOneId] = useState<string | null>(null)
-  const [isSavingProfile, setIsSavingProfile] = useState(false)
+  const [profileSavedMsg, setProfileSavedMsg] = useState('')
   const [expandedCategory, setExpandedCategory] = useState<string | null>(null)
   const [taxDetailsExpanded, setTaxDetailsExpanded] = useState(false)
-  const [showSaveSuccessDialog, setShowSaveSuccessDialog] = useState(false)
-  const [showDriveConnectPrompt, setShowDriveConnectPrompt] = useState(false)
   const [yearPickerOpen, setYearPickerOpen] = useState(false)
   const [eaFormDialogOpen, setEaFormDialogOpen] = useState(false)
   const [eaFormData, setEaFormData] = useState<{
@@ -800,15 +799,6 @@ useEffect(() => {
       setEaFormVerifyResult(v)
     }
   }, [eaFormData?.grossIncome, eaFormData?.employerName, eaFormData?.epfContribution, eaFormData?.socsoContribution, eaFormData?.pcbPaid])
-  // Auto-dismiss success dialog after 2.5s so it never ghost-block clicks
-  useEffect(() => {
-    if (showSaveSuccessDialog) {
-      const t = setTimeout(() => setShowSaveSuccessDialog(false), 2500)
-      return () => clearTimeout(t)
-    }
-  }, [showSaveSuccessDialog])
-  const [showSaveErrorDialog, setShowSaveErrorDialog] = useState(false)
-  const [saveErrorMsg, setSaveErrorMsg] = useState("")
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null)
   const [uploadedFileName, setUploadedFileName] = useState("")
   const [formErrors, setFormErrors] = useState<Record<string, boolean>>({})
@@ -961,8 +951,7 @@ useEffect(() => {
       setOcrResult(result)
       setIsVerifying(false)
       setVerifyResult(null)
-      // Show review dialog — user confirms extracted data before form
-      setReviewData({
+      const reviewPayload = {
         vendor: result.vendor || '',
         amount: result.amount ? String(Math.round(result.amount)) : '',
         date: result.date || `${settings.defaultTaxYear}-${new Date().toISOString().slice(5, 10)}`,
@@ -971,8 +960,31 @@ useEffect(() => {
         confidence: result.confidence,
         rawText: result.raw_text,
         category: result.category || 'lifestyle',
-      })
-      setShowOcrReview(true)
+      }
+      // High-confidence auto-save: skip review screen if ≥85% and data is complete
+      if (result.confidence >= 85 && reviewPayload.vendor && reviewPayload.amount) {
+        addRecord({
+          category: reviewPayload.category,
+          date: reviewPayload.date,
+          amount: parseFloat(reviewPayload.amount),
+          merchant: reviewPayload.vendor,
+          status: 'verified',
+          receiptUrl: receiptPreview || undefined,
+          receiptFileName: uploadedFileName || undefined,
+          invoiceNumber: reviewPayload.invoiceNumber || undefined,
+        })
+        toast.success("Saved — tap to review", {
+          description: `${reviewPayload.vendor} · RM ${reviewPayload.amount}`,
+          duration: 3000,
+        })
+        if (!settings.googleDriveConnected) {
+          setTimeout(() => toast("Connect Google Drive in Settings to back up your records."), 1500)
+        }
+        closeAddDrawer()
+      } else {
+        setReviewData(reviewPayload)
+        setShowOcrReview(true)
+      }
     } catch (err) {
       console.error("OCR failed:", err)
       toast.error("OCR failed. Please enter details manually.")
@@ -1153,6 +1165,9 @@ useEffect(() => {
       recipient: newRecord.recipient || undefined,
     })
     toast.success("Record added successfully!")
+    if (!settings.googleDriveConnected) {
+      setTimeout(() => toast("Connect Google Drive in Settings to back up your records."), 1200)
+    }
     // Reset form immediately — before Drive sync
     closeAddDrawer()
     // Build saved record for sync
@@ -1175,6 +1190,26 @@ useEffect(() => {
     setTimeout(() => setIsSaving(false), 300)
   }
 
+  const handleSaveFromReview = () => {
+    if (!reviewData) return
+    if (!reviewData.vendor.trim() || !reviewData.amount) return
+    addRecord({
+      category: reviewData.category,
+      date: reviewData.date,
+      amount: parseFloat(reviewData.amount),
+      merchant: reviewData.vendor,
+      status: 'verified',
+      receiptUrl: receiptPreview || undefined,
+      receiptFileName: uploadedFileName || undefined,
+      invoiceNumber: reviewData.invoiceNumber || undefined,
+    })
+    toast.success("Record added successfully!")
+    if (!settings.googleDriveConnected) {
+      setTimeout(() => toast("Connect Google Drive in Settings to back up your records."), 1200)
+    }
+    closeAddDrawer()
+  }
+
   const closeAddDrawer = () => {
     setIsAddModalOpen(false)
     setShowOCRForm(false)
@@ -1183,6 +1218,8 @@ useEffect(() => {
     setOcrResult(null)
     setVerifyResult(null)
     setIsVerifying(false)
+    setShowOcrReview(false)
+    setShowQrScanner(false)
     setReceiptPreview(null)
     setUploadedFileName("")
     setFormErrors({})
@@ -1233,44 +1270,6 @@ useEffect(() => {
   }
 
   // ── Profile Save ────────────────────────────────────────────────────────
-  // handleSaveProfile is explicitly triggered by the user pressing "Save Profile".
-  // updateProfile already persists immediately via Zustand persist middleware,
-  // but we call it here explicitly so the save button gives real feedback.
-  const handleSaveProfile = useCallback(async () => {
-    if (!isHydrated) {
-      toast.error("App still loading. Please wait.")
-      return
-    }
-    // Demo mode: profile is read-only, show toast
-    if (isDemoMode) {
-      toast("[demo profile] profile details would not be saved")
-      return
-    }
-    setIsSavingProfile(true)
-    try {
-      // Flush latest nameInput to store before persisting to file
-      const nameVal = nameInputRef.current?.value || nameInput
-      updateProfile({ name: nameVal })
-      const res = await fetch('/api/profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profile: { ...profile, name: nameVal } }),
-      })
-      const data = await res.json()
-      if (!res.ok || !data.success) {
-        setSaveErrorMsg(data.error ?? 'Unknown error. Please try again.')
-        setShowSaveErrorDialog(true)
-      } else {
-        setShowSaveSuccessDialog(true)
-      }
-    } catch {
-      setSaveErrorMsg('Network error. Please check your connection and try again.')
-      setShowSaveErrorDialog(true)
-    } finally {
-      setIsSavingProfile(false)
-    }
-  }, [isHydrated, profile, nameInput, updateProfile])
-
   // ── Google Drive Mock ──────────────────────────────────────────────────
   const handleConnectDrive = async () => {
     const supabase = createSupabaseBrowserClient()
@@ -1683,6 +1682,113 @@ useEffect(() => {
             </CardContent>
           </Card>
 
+          {/* Smart Insight Cards */}
+          {(() => {
+            const today = new Date()
+            const yearEnd = new Date(`${settings.defaultTaxYear}-12-31`)
+            const daysLeft = Math.ceil((yearEnd.getTime() - today.getTime()) / 86400000)
+            const insights: Array<{ type: 'unclaimed' | 'near-limit' | 'maxed' | 'deadline' | 'income'; reliefId?: string; reliefName?: string; claimed?: number; limit?: number; remaining?: number }> = []
+
+            // Income prompt (highest priority if no income set)
+            const grossIncome = settings.eaFormByYear?.[parseInt(settings.defaultTaxYear)]?.grossIncome ?? displayProfile.grossIncome ?? 0
+            if (grossIncome <= 0) {
+              insights.push({ type: 'income' })
+            }
+
+            // Per-category insights
+            applicableReliefs.forEach((relief) => {
+              if (relief.alwaysShow) return // Skip auto-reliefs (individual)
+              const claimed = reliefTotals[relief.id] || 0
+              const maxLimit = relief.perItem
+                ? relief.id === "children_under18"
+                  ? displayProfile.childrenUnder18 * relief.maxLimit
+                  : displayProfile.childrenEducation * relief.maxLimit
+                : relief.maxLimit
+              const pct = maxLimit > 0 ? (claimed / maxLimit) * 100 : 0
+              if (claimed === 0) {
+                insights.push({ type: 'unclaimed', reliefId: relief.id, reliefName: relief.name, claimed: 0, limit: maxLimit })
+              } else if (pct >= 100) {
+                insights.push({ type: 'maxed', reliefId: relief.id, reliefName: relief.name, claimed, limit: maxLimit })
+              } else if (pct >= 80) {
+                insights.push({ type: 'near-limit', reliefId: relief.id, reliefName: relief.name, claimed, limit: maxLimit, remaining: maxLimit - claimed })
+              }
+            })
+
+            // Deadline alert (only if within 90 days)
+            if (daysLeft > 0 && daysLeft <= 90) {
+              insights.push({ type: 'deadline' })
+            }
+
+            if (insights.length === 0) return null
+
+            // Show at most 3 insights
+            const shown = insights.slice(0, 3)
+            return (
+              <div className="space-y-2">
+                <h2 className="font-semibold text-foreground">Insights</h2>
+                {shown.map((ins, i) => {
+                  if (ins.type === 'income') return (
+                    <button
+                      key="income"
+                      onClick={() => { setActiveTab("profile"); router.push(pathname + "?tab=profile") }}
+                      className="flex w-full items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left transition-all hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/30 dark:hover:bg-amber-950/50"
+                    >
+                      <AlertTriangle className="h-5 w-5 shrink-0 text-amber-500" />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-amber-800 dark:text-amber-200">Add your income</p>
+                        <p className="text-sm text-amber-700 dark:text-amber-300">See your estimated tax savings →</p>
+                      </div>
+                    </button>
+                  )
+                  if (ins.type === 'unclaimed') return (
+                    <button
+                      key={`unclaimed-${ins.reliefId}`}
+                      onClick={() => {
+                        setNewRecord(prev => ({ ...prev, category: ins.reliefId! }))
+                        setIsAddModalOpen(true)
+                      }}
+                      className="flex w-full items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-left transition-all hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950/30 dark:hover:bg-blue-950/50"
+                    >
+                      <AlertCircle className="h-5 w-5 shrink-0 text-blue-500" />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-blue-800 dark:text-blue-200 truncate">{ins.reliefName} — nothing claimed yet</p>
+                        <p className="text-sm text-blue-700 dark:text-blue-300">Add receipt →</p>
+                      </div>
+                    </button>
+                  )
+                  if (ins.type === 'near-limit') return (
+                    <div key={`near-${ins.reliefId}`} className="flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/30">
+                      <AlertTriangle className="h-5 w-5 shrink-0 text-amber-500" />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-amber-800 dark:text-amber-200 truncate">{ins.reliefName} almost maxed</p>
+                        <p className="text-sm text-amber-700 dark:text-amber-300">{formatRM(ins.remaining!)} remaining before limit</p>
+                      </div>
+                    </div>
+                  )
+                  if (ins.type === 'maxed') return (
+                    <div key={`maxed-${ins.reliefId}`} className="flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 dark:border-emerald-800 dark:bg-emerald-950/30">
+                      <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-500" />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-emerald-800 dark:text-emerald-200 truncate">{ins.reliefName} maxed</p>
+                        <p className="text-sm text-emerald-700 dark:text-emerald-300">{formatRM(ins.limit!)} claimed — great job!</p>
+                      </div>
+                    </div>
+                  )
+                  if (ins.type === 'deadline') return (
+                    <div key="deadline" className="flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 dark:border-red-800 dark:bg-red-950/30">
+                      <AlertTriangle className="h-5 w-5 shrink-0 text-red-500" />
+                      <div className="min-w-0 flex-1">
+                        <p className="font-medium text-red-800 dark:text-red-200">Only {daysLeft} days left in YA {settings.defaultTaxYear}</p>
+                        <p className="text-sm text-red-700 dark:text-red-300">Add receipts before 31 Dec</p>
+                      </div>
+                    </div>
+                  )
+                  return null
+                })}
+              </div>
+            )
+          })()}
+
           {/* Applicable Reliefs */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -1706,8 +1812,8 @@ useEffect(() => {
               return (
                 <Card
                   key={relief.id}
-                  className={`transition-all hover:shadow-md ${hasSubcategories ? 'cursor-pointer' : ''}`}
-                  onClick={() => hasSubcategories ? setExpandedCategory(expandedCategory === relief.id ? null : relief.id) : undefined}
+                  className="cursor-pointer transition-all hover:shadow-md"
+                  onClick={() => setExpandedCategory(expandedCategory === relief.id ? null : relief.id)}
                 >
                   <CardContent className="p-4">
                     <div className="flex items-start gap-3">
@@ -1724,11 +1830,7 @@ useEffect(() => {
                               {relief.description}
                             </p>
                           </div>
-                          {hasSubcategories ? (
-                            <ChevronRight className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 ${expandedCategory === relief.id ? 'rotate-90' : ''}`} />
-                          ) : (
-                            <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-                          )}
+                          <ChevronRight className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200 ${expandedCategory === relief.id ? 'rotate-90' : ''}`} />
                         </div>
                         <div className="mt-2 space-y-1">
                           <div className="flex items-center justify-between text-sm">
@@ -1747,33 +1849,63 @@ useEffect(() => {
                         </div>
                       </div>
                     </div>
-                    {expandedCategory === relief.id && relief.subcategories && (
-                      <div className="mt-4 space-y-2 border-t pt-4">
-                        {relief.subcategories.map((sub) => {
-                          let subClaimed = floorRM(getSubCategoryTotal(displayRecords, relief.id, sub.id))
-                          // Inject EA Form values into correct subcategories (they're not stored as records)
-                          const currentEA = getCurrentYearEAForm()
-                          if (relief.id === 'epf_insurance' && currentEA?.confirmed) {
-                            if (sub.id === 'epf_mandatory') subClaimed += floorRM(Math.min(currentEA.epf || 0, 4000))
-                            if (sub.id === 'epf_socso') subClaimed += floorRM(Math.min(currentEA.socso || 0, 350))
-                          }
-                          const effectiveMax = sub.maxLimit || maxLimit
-                          const subPct = Math.min(Math.round((subClaimed / effectiveMax) * 100), 100)
-                          return (
-                            <div key={sub.id} className="flex items-center gap-3">
-                              <div className="w-36 text-sm text-muted-foreground truncate">{sub.name}</div>
-                              <div className="flex-1">
-                                <div className="h-2 overflow-hidden rounded-full bg-muted">
-                                  <div className="h-full rounded-full transition-all" style={{ width: `${subPct}%`, backgroundColor: getColor(relief.color).hex }} />
+                    {expandedCategory === relief.id && (
+                      <div className="mt-4 space-y-3 border-t pt-4">
+                        {/* Subcategory breakdown */}
+                        {relief.subcategories && (
+                          <div className="space-y-2">
+                            {relief.subcategories.map((sub) => {
+                              let subClaimed = floorRM(getSubCategoryTotal(displayRecords, relief.id, sub.id))
+                              const currentEA = getCurrentYearEAForm()
+                              if (relief.id === 'epf_insurance' && currentEA?.confirmed) {
+                                if (sub.id === 'epf_mandatory') subClaimed += floorRM(Math.min(currentEA.epf || 0, 4000))
+                                if (sub.id === 'epf_socso') subClaimed += floorRM(Math.min(currentEA.socso || 0, 350))
+                              }
+                              const effectiveMax = sub.maxLimit || maxLimit
+                              const subPct = Math.min(Math.round((subClaimed / effectiveMax) * 100), 100)
+                              return (
+                                <div key={sub.id} className="flex items-center gap-3">
+                                  <div className="w-36 text-sm text-muted-foreground truncate">{sub.name}</div>
+                                  <div className="flex-1">
+                                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                                      <div className="h-full rounded-full transition-all" style={{ width: `${subPct}%`, backgroundColor: getColor(relief.color).hex }} />
+                                    </div>
+                                  </div>
+                                  <div className="text-sm font-medium min-w-[4rem] text-right">
+                                    {formatRM(subClaimed)} <span className="text-muted-foreground text-xs">/ {effectiveMax > 0 && effectiveMax < maxLimit ? formatRM(effectiveMax) : 'unlimited'}</span>
+                                  </div>
                                 </div>
-                              </div>
-                              <div className="text-sm font-medium min-w-[4rem] text-right">
-                                {formatRM(subClaimed)} <span className="text-muted-foreground text-xs">/ {effectiveMax > 0 && effectiveMax < maxLimit ? formatRM(effectiveMax) : 'unlimited'}</span>
-                              </div>
-                            </div>
-                          )
-                        })}
-
+                              )
+                            })}
+                          </div>
+                        )}
+                        {/* What qualifies? */}
+                        <div className="rounded-lg bg-muted/50 px-3 py-2.5">
+                          <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">What qualifies?</p>
+                          <p className="text-sm text-foreground leading-relaxed">{relief.description}</p>
+                          {relief.subcategories && (
+                            <ul className="mt-2 space-y-0.5">
+                              {relief.subcategories.map(sub => (
+                                <li key={sub.id} className="flex items-start gap-1.5 text-sm text-muted-foreground">
+                                  <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
+                                  <span>{sub.name}{sub.description ? ` — ${sub.description}` : ''}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                        {/* Add receipt CTA */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setNewRecord(prev => ({ ...prev, category: relief.id }))
+                            setIsAddModalOpen(true)
+                          }}
+                          className="flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 py-2 text-sm font-medium text-emerald-700 transition-all hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          Add Receipt for {relief.name.split(" ")[0]}
+                        </button>
                       </div>
                     )}
                   </CardContent>
@@ -2172,6 +2304,8 @@ useEffect(() => {
       } else {
         updateProfile(updates as any)
       }
+      setProfileSavedMsg('Saved')
+      setTimeout(() => setProfileSavedMsg(''), 2000)
     }
 
     // EA Form data for this YA
@@ -2292,16 +2426,20 @@ useEffect(() => {
               className="hidden"
               onChange={handleEAFormUpload}
             />
-            {/* Mobile-friendly debug feedback */}
+            {/* EA Form status feedback */}
             {eaFormDebug && (
               <div className={cn(
-                "rounded-lg px-3 py-2 text-sm font-medium transition-all",
+                "flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-all",
                 eaFormDebug.startsWith('✅') && "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800",
                 eaFormDebug.startsWith('⚠️') && "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800",
                 eaFormDebug.startsWith('❌') && "bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300 border border-red-200 dark:border-red-800",
                 eaFormDebug.startsWith('🔍') && "bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300 border border-blue-200 dark:border-blue-800"
               )}>
-                {eaFormDebug}
+                {eaFormDebug.startsWith('🔍') && <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin" />}
+                {eaFormDebug.startsWith('✅') && <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />}
+                {eaFormDebug.startsWith('⚠️') && <AlertTriangle className="h-3.5 w-3.5 shrink-0" />}
+                {eaFormDebug.startsWith('❌') && <AlertTriangle className="h-3.5 w-3.5 shrink-0" />}
+                <span>{eaFormDebug.replace(/^[🔍✅⚠️❌]\s*/, '')}</span>
               </div>
             )}
 
@@ -2455,23 +2593,12 @@ useEffect(() => {
           </CardContent>
         </Card>
 
-        <Button
-          className="h-12 w-full bg-primary hover:bg-primary/90 text-base font-semibold"
-          onClick={handleSaveProfile}
-          disabled={isSavingProfile}
-        >
-          {isSavingProfile ? (
-            <>
-              <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-              Saving…
-            </>
-          ) : (
-            <>
-              <CheckCircle2 className="mr-2 h-4 w-4" />
-              Save Profile
-            </>
-          )}
-        </Button>
+        {profileSavedMsg && (
+          <p className="flex items-center justify-center gap-1.5 text-sm font-medium text-emerald-600 dark:text-emerald-400 transition-all">
+            <CheckCircle2 className="h-4 w-4" />
+            {profileSavedMsg}
+          </p>
+        )}
 
         {/* Sign Out — red button, same style as Save Profile */}
         <button
@@ -2589,76 +2716,6 @@ useEffect(() => {
           </Card>
         </div>
 
-        {/* Drive Sync Diagnostics */}
-        <div className="space-y-3">
-          <button
-            onClick={() => setSyncDiagnosticsOpen(o => !o)}
-            className="flex w-full items-center gap-2.5 px-1 text-left"
-          >
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-100 dark:bg-emerald-900/40">
-              <AlertTriangle className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-            </div>
-            <h2 className="font-semibold text-foreground">Drive Sync Diagnostics</h2>
-            <ChevronRight className={cn("h-4 w-4 text-muted-foreground transition-transform", syncDiagnosticsOpen && "rotate-90")} />
-          </button>
-
-          {syncDiagnosticsOpen && (
-            <Card className="overflow-hidden border-0 shadow-sm ring-1 ring-border">
-              <CardContent className="space-y-4 p-4">
-                {/* Debug state strip */}
-                <div className="rounded-lg bg-muted/60 px-3 py-2 font-mono text-xs text-muted-foreground">
-                  <span className={cn("font-semibold", !isDemoMode ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400")}>
-                    {isDemoMode ? "Demo: true" : "Demo: false"}
-                  </span>
-                  <span className="mx-2 text-muted-foreground/40">|</span>
-                  <span className={cn("font-semibold", settings.googleDriveConnected ? "text-emerald-600 dark:text-emerald-400" : "text-red-500")}>
-                    {settings.googleDriveConnected ? "Drive Connected: true" : "Drive Connected: false"}
-                  </span>
-                  <span className="mx-2 text-muted-foreground/40">|</span>
-                  <span className={cn("font-semibold", driveFolderIds.manifestFileIds && driveFolderIds.categoryFolderIds ? "text-emerald-600 dark:text-emerald-400" : "text-red-500")}>
-                    {driveFolderIds.manifestFileIds && driveFolderIds.categoryFolderIds ? "Manifest IDs: loaded" : "Manifest IDs: missing"}
-                  </span>
-                </div>
-
-                {/* Sync log */}
-                {syncLog.length === 0 ? (
-                  <p className="text-sm text-muted-foreground italic py-2">No sync activity yet. Trigger a save/update to see events here.</p>
-                ) : (
-                  <ScrollArea className="max-h-48 rounded-lg bg-muted/30 p-2 font-mono text-xs">
-                    <div className="space-y-0.5">
-                      {[...syncLog].reverse().map((entry, i) => (
-                        <div key={i} className={cn(
-                          "flex items-center gap-2 py-0.5",
-                          entry.status === 'pending' && "text-muted-foreground",
-                          entry.status === 'success' && "text-emerald-600 dark:text-emerald-400",
-                          entry.status === 'error' && "text-red-500"
-                        )}>
-                          <span className="shrink-0 opacity-60">[{entry.time}]</span>
-                          <span>{entry.action}</span>
-                          <span className="shrink-0">
-                            {entry.status === 'pending' && '→ ⟳ pending'}
-                            {entry.status === 'success' && '→ ✓ success'}
-                            {entry.status === 'error' && `→ ✗ error: ${entry.detail || ''}`}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </ScrollArea>
-                )}
-
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8 w-full text-xs"
-                  onClick={() => setSyncLog([])}
-                >
-                  Clear Log
-                </Button>
-              </CardContent>
-            </Card>
-          )}
-        </div>
-
         {/* Notifications */}
         <div className="space-y-3">
           <div className="flex items-center gap-2.5 px-1">
@@ -2672,9 +2729,7 @@ useEffect(() => {
               {[
                 ["Tax deadline reminders", "taxDeadlineReminders", "Get notified before filing deadlines"],
                 ["Low relief utilization alerts", "lowReliefAlerts", "Alert when reliefs are underutilized"],
-                ["Weekly summary", "weeklySummary", "Receive weekly relief summary"],
-                ["New LHDN updates", "lhdnUpdates", "Get notified about tax law changes"],
-              ].map(([label, key, desc], i, arr) => (
+              ].map(([label, key, desc], i) => (
                 <div key={key} className={`${i > 0 ? "border-t border-border/60" : ""}`}>
                   <div className="flex min-h-[56px] items-center justify-between gap-3 px-5 py-3 transition-colors hover:bg-muted/30">
                     <div className="min-w-0 flex-1">
@@ -2689,36 +2744,6 @@ useEffect(() => {
                   </div>
                 </div>
               ))}
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Security */}
-        <div className="space-y-3">
-          <div className="flex items-center gap-2.5 px-1">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-100 dark:bg-emerald-900/40">
-              <Shield className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-            </div>
-            <h2 className=" font-semibold text-foreground">Security</h2>
-          </div>
-          <Card className="overflow-hidden border-0 shadow-sm ring-1 ring-border">
-            <CardContent className="p-5">
-              <div className="flex min-h-[48px] items-center justify-between">
-                <div className="flex items-center gap-3.5">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-emerald-50 to-emerald-100 dark:from-emerald-950/40 dark:to-emerald-900/30">
-                    <Fingerprint className="h-4.5 w-4.5 text-emerald-600 dark:text-emerald-400" />
-                  </div>
-                  <div>
-                    <p className=" font-medium text-foreground">Biometric Lock</p>
-                    <p className=" text-muted-foreground">Face ID / Fingerprint</p>
-                  </div>
-                </div>
-                <Switch
-                  checked={settings.biometricLock}
-                  onCheckedChange={(v) => updateSettings({ biometricLock: v })}
-                  className="shrink-0"
-                />
-              </div>
             </CardContent>
           </Card>
         </div>
@@ -2748,7 +2773,6 @@ useEffect(() => {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="en">English</SelectItem>
-                    <SelectItem value="ms">Bahasa Melayu</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -2878,17 +2902,20 @@ useEffect(() => {
               </div>
               <div className="flex flex-col gap-1.5">
                 {[
-                  "Privacy Policy",
-                  "Terms of Service",
-                  "LHDN Official Website",
-                ].map((item) => (
-                  <button
-                    key={item}
+                  { label: "Privacy Policy", href: "/privacy" },
+                  { label: "Terms of Service", href: "/terms" },
+                  { label: "LHDN Official Website", href: "https://www.hasil.gov.my" },
+                ].map(({ label, href }) => (
+                  <a
+                    key={label}
+                    href={href}
+                    target={href.startsWith("http") ? "_blank" : undefined}
+                    rel={href.startsWith("http") ? "noopener noreferrer" : undefined}
                     className="flex min-h-[44px] items-center justify-between rounded-xl px-3.5 text-sm text-foreground transition-all hover:bg-muted/60 active:scale-[0.99]"
                   >
-                    <span>{item}</span>
+                    <span>{label}</span>
                     <ExternalLink className="h-4 w-4 text-muted-foreground" />
-                  </button>
+                  </a>
                 ))}
               </div>
             </CardContent>
@@ -2904,6 +2931,10 @@ useEffect(() => {
   return (
     <div className="flex h-[100svh] w-full flex-col bg-background">
 
+      {/* First-run onboarding wizard — shown once, skipped for demo and returning users */}
+      {isHydrated && !settings.onboardingComplete && records.length === 0 && !isDemoMode && (
+        <OnboardingWizard />
+      )}
 
       {/* Main Content */}
       <main className="flex-1 pt-2 pb-[env(safe-area-inset-bottom)] w-full overflow-y-auto overscroll-contain">
@@ -2950,199 +2981,129 @@ useEffect(() => {
 
           {/* ── OCR Review Dialog ── */}
           {showOcrReview && reviewData && (
-            <div className="px-4 pb-4">
-              {/* Receipt image thumbnail */}
+            <div className="space-y-4 px-4 pb-4">
+              {/* Receipt thumbnail */}
               {receiptPreview && (
-                <div className="mb-3">
-                  <img src={receiptPreview} alt="Receipt" className="h-20 w-full object-contain rounded-lg border border-gray-200 dark:border-gray-700" />
-                </div>
+                <img
+                  src={receiptPreview}
+                  alt="Receipt"
+                  className="h-20 w-full rounded-xl border border-border object-contain"
+                />
               )}
-              
-              <div className="rounded-xl border-2 border-blue-200 bg-blue-50 dark:bg-blue-950/20 p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <FileText className="h-5 w-5 text-blue-600" />
-                  <h3 className="font-semibold text-blue-900 dark:text-blue-300">Verify Extracted Data</h3>
-                  <span className="ml-auto text-xs text-blue-600 bg-blue-100 dark:bg-blue-900 px-2 py-0.5 rounded-full">
-                    {Math.round(reviewData.confidence * 100)}% confidence
-                  </span>
+
+              {/* 3 primary fields */}
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label className="text-sm font-medium">Merchant</Label>
+                  <Input
+                    value={reviewData.vendor}
+                    onChange={(e) => setReviewData({ ...reviewData, vendor: e.target.value })}
+                    className="h-11 font-medium"
+                    placeholder="Merchant name"
+                  />
                 </div>
-                
-                <div className="space-y-3">
-                  {/* Merchant */}
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-blue-700 dark:text-blue-400 uppercase tracking-wide">Merchant / Shop</Label>
-                    <Input
-                      value={reviewData.vendor}
-                      onChange={(e) => setReviewData({ ...reviewData, vendor: e.target.value })}
-                      className="font-medium"
-                      placeholder="Merchant name"
-                    />
-                  </div>
-                  
-                  {/* Amount */}
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-blue-700 dark:text-blue-400 uppercase tracking-wide">Amount (RM)</Label>
-                    <Input
-                      type="number"
-                      value={reviewData.amount}
-                      onChange={(e) => setReviewData({ ...reviewData, amount: e.target.value })}
-                      className="font-medium"
-                      placeholder="0.00"
-                    />
-                  </div>
-                  
-                  {/* Date */}
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-blue-700 dark:text-blue-400 uppercase tracking-wide">Date</Label>
-                    <Input
-                      type="date"
-                      value={reviewData.date}
-                      onChange={(e) => setReviewData({ ...reviewData, date: e.target.value })}
-                    />
-                  </div>
-                  
-                  {/* Invoice Number */}
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-blue-700 dark:text-blue-400 uppercase tracking-wide">Invoice / Receipt No.</Label>
-                    <Input
-                      value={reviewData.invoiceNumber}
-                      onChange={(e) => setReviewData({ ...reviewData, invoiceNumber: e.target.value })}
-                      placeholder="Optional"
-                    />
-                  </div>
-                  
-                  {/* Category hint */}
-                  <div className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400">
-                    <Tag className="h-3 w-3" />
-                    <span>Suggested: <span className="font-medium">{reviewData.category}</span></span>
-                  </div>
-                  
-                  {/* Mandatory field warning */}
-                  {(!reviewData.vendor.trim() || !reviewData.amount) && (
-                    <div className="flex items-center gap-2 text-xs text-amber-600 bg-amber-50 dark:bg-amber-950/30 rounded-lg px-3 py-2">
-                      <AlertCircle className="h-4 w-4 shrink-0" />
-                      <span>Merchant and amount are required — please fill in</span>
-                    </div>
-                  )}
+                <div className="space-y-1.5">
+                  <Label className="text-sm font-medium">Amount (RM)</Label>
+                  <Input
+                    type="number"
+                    value={reviewData.amount}
+                    onChange={(e) => setReviewData({ ...reviewData, amount: e.target.value })}
+                    className="h-11 font-medium"
+                    placeholder="0.00"
+                  />
                 </div>
-                
-                <div className="flex gap-2 mt-4">
-                  <Button
-                    variant="outline"
-                    className="flex-1"
-                    onClick={() => {
-                      setShowOcrReview(false)
-                      setShowOCRForm(false)
-                      setIsProcessing(false)
-                      setOcrResult(null)
-                      setReceiptPreview(null)
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    className="flex-1"
-                    onClick={() => {
-                      // Apply confirmed data to newRecord form and proceed
-                      setNewRecord(prev => ({
-                        ...prev,
-                        // lhdNCategory & recipient intentionally omitted — TODO: derive from raw_text or user input
-                        merchant: reviewData.vendor,
-                        amount: reviewData.amount,
-                        date: reviewData.date,
-                        invoiceNumber: reviewData.invoiceNumber,
-                        category: reviewData.category,
-                      }))
-                      setShowOcrReview(false)
-                      setShowOCRForm(true)
-                    }}
-                    disabled={!reviewData.vendor.trim() || !reviewData.amount}
-                  >
-                    Confirm & Continue →
-                  </Button>
+                <div className="space-y-1.5">
+                  <Label className="text-sm font-medium">Date</Label>
+                  <Input
+                    type="date"
+                    value={reviewData.date}
+                    onChange={(e) => setReviewData({ ...reviewData, date: e.target.value })}
+                    className="h-11"
+                  />
                 </div>
               </div>
 
-              {/* ── OCR Details — full extraction breakdown ── */}
-              {ocrResult && (
-                <details className="mt-3 rounded-xl border border-blue-200 dark:border-blue-800 overflow-hidden">
-                  <summary className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-blue-700 dark:text-blue-400 cursor-pointer hover:bg-blue-50 dark:hover:bg-blue-950/30 select-none">
-                    <Info className="h-3.5 w-3.5 shrink-0" />
-                    View OCR Details
-                  </summary>
-                  <div className="px-3 pb-3 pt-1 space-y-3">
+              {/* Category chip + confidence */}
+              <div className="flex items-center justify-between">
+                <Select
+                  value={reviewData.category}
+                  onValueChange={(v) => setReviewData({ ...reviewData, category: v })}
+                >
+                  <SelectTrigger className="h-8 w-auto gap-1.5 border-emerald-200 bg-emerald-50 px-2.5 text-xs text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
+                    <Tag className="h-3 w-3 shrink-0" />
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {RELIEF_CATEGORIES.map((c) => (
+                      <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="text-xs text-muted-foreground">
+                  {Math.round(reviewData.confidence * 100)}% confidence
+                </span>
+              </div>
 
-                    {/* Confidence + metadata row */}
-                    <div className="flex flex-wrap items-center gap-2">
-                      <OcrConfidenceBadge
-                        confidence={ocrResult.confidence}
-                        needsReview={ocrResult.needs_review}
-                      />
-                      {ocrResult.extraction_method && (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300">
-                          {ocrResult.extraction_method}
-                        </span>
-                      )}
-                      {ocrResult.document_type && ocrResult.document_type !== 'unknown' && (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                          {ocrResult.document_type}
-                        </span>
-                      )}
-                      {ocrResult.needs_review && (
-                        <span className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
-                          <AlertTriangle className="h-3 w-3" />
-                          Needs review
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Extracted fields grid */}
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-                      {[
-                        ['Vendor', ocrResult.vendor],
-                        ['Amount', ocrResult.amount != null ? `RM ${ocrResult.amount.toFixed(2)}` : null],
-                        ['Date', ocrResult.date],
-                        ['Time', ocrResult.time],
-                        ['Category', ocrResult.category],
-                        ['Invoice #', ocrResult.invoice_number],
-                        ['TIN', ocrResult.tin],
-                        ['SST Reg.', ocrResult.sst_registration_no],
-                        ['Tax Amount', ocrResult.tax_amount != null ? `RM ${ocrResult.tax_amount.toFixed(2)}` : null],
-                        ['Tax Type', ocrResult.tax_type],
-                      ].filter(([, v]) => v != null && v !== '').map(([label, value]) => (
-                        <div key={label as string} className="flex gap-2">
-                          <span className="text-muted-foreground shrink-0">{label}:</span>
-                          <span className="font-medium truncate">{value as string}</span>
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Raw text */}
-                    <div>
-                      <p className="text-xs text-muted-foreground mb-1 font-medium uppercase tracking-wide">Raw OCR Text</p>
-                      <pre className="text-xs text-muted-foreground bg-muted/50 rounded-lg p-2 overflow-x-auto max-h-48 whitespace-pre-wrap font-mono">
-                        {ocrResult.raw_text || 'N/A'}
-                      </pre>
-                    </div>
-
-                  </div>
-                </details>
+              {/* Validation warning */}
+              {(!reviewData.vendor.trim() || !reviewData.amount) && (
+                <div className="flex items-center gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-600 dark:bg-amber-950/30 dark:text-amber-400">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>Merchant and amount are required</span>
+                </div>
               )}
 
-              {/* Raw OCR text — collapsible for debugging */}
-              <details className="mt-3">
-                <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
-                  Show raw OCR ({reviewData.rawText.length} chars)
-                </summary>
-                <pre className="mt-2 text-xs text-muted-foreground bg-muted/50 rounded-lg p-2 overflow-x-auto max-h-32 whitespace-pre-wrap">
-                  {reviewData.rawText.slice(0, 600)}
-                </pre>
-              </details>
+              {/* Action buttons */}
+              <Button
+                className="h-12 w-full text-base font-semibold"
+                onClick={handleSaveFromReview}
+                disabled={!reviewData.vendor.trim() || !reviewData.amount}
+              >
+                Save Record
+              </Button>
+              <Button
+                variant="ghost"
+                className="h-10 w-full text-sm text-muted-foreground"
+                onClick={() => {
+                  setNewRecord(prev => ({
+                    ...prev,
+                    merchant: reviewData.vendor,
+                    amount: reviewData.amount,
+                    date: reviewData.date,
+                    invoiceNumber: reviewData.invoiceNumber,
+                    category: reviewData.category,
+                  }))
+                  setShowOcrReview(false)
+                  setShowOCRForm(true)
+                }}
+              >
+                Edit Details ›
+              </Button>
             </div>
           )}
 
-          {/* ── Upload Options (original) ── */}
-          {!isProcessing && !showOcrReview && !showOCRForm && !isVerifying ? (
+          {/* ── QR Scanner overlay ── */}
+          {showQrScanner && (
+            <QrScanner
+              onCancel={() => setShowQrScanner(false)}
+              onResult={(result: QrScanResult) => {
+                setShowQrScanner(false)
+                setReviewData({
+                  vendor: result.vendor || '',
+                  amount: result.amount ? String(result.amount) : '',
+                  date: result.date || `${settings.defaultTaxYear}-${new Date().toISOString().slice(5, 10)}`,
+                  description: '',
+                  invoiceNumber: result.invoiceNumber || '',
+                  confidence: result.uuid ? 100 : 50,
+                  rawText: result.rawUrl,
+                  category: 'lifestyle',
+                })
+                setShowOcrReview(true)
+              }}
+            />
+          )}
+
+          {/* ── Upload Options ── */}
+          {!isProcessing && !showOcrReview && !showOCRForm && !isVerifying && !showQrScanner ? (
             // Upload options
             <div className="space-y-4 p-4">
               <Button
@@ -3160,6 +3121,19 @@ useEffect(() => {
               >
                 <Upload className="h-8 w-8 text-primary" />
                 <span>Upload Image or PDF</span>
+              </Button>
+              <Button
+                variant="outline"
+                className="h-24 w-full flex-col gap-2"
+                onClick={() => setShowQrScanner(true)}
+              >
+                <svg className="h-8 w-8 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="3" y="3" width="7" height="7" rx="1" />
+                  <rect x="14" y="3" width="7" height="7" rx="1" />
+                  <rect x="3" y="14" width="7" height="7" rx="1" />
+                  <path d="M14 14h2v2h-2zM18 14h3M14 18h3M18 18v3M21 18v.01" />
+                </svg>
+                <span>Scan e-Invoice QR</span>
               </Button>
               <div className="relative">
                 <div className="absolute inset-0 flex items-center">
@@ -3621,65 +3595,6 @@ useEffect(() => {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Profile Save Success Dialog */}
-      <AlertDialog open={showSaveSuccessDialog} onOpenChange={setShowSaveSuccessDialog}>
-        <AlertDialogContent className="max-w-sm">
-          <AlertDialogHeader>
-            <AlertDialogTitle className="flex items-center gap-2 text-emerald-600">
-              <CheckCircle2 className="h-5 w-5" /> Profile Saved
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              Your profile details have been saved to file successfully.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogAction onClick={() => setShowSaveSuccessDialog(false)}>
-              OK
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Profile Save Error Dialog */}
-      <AlertDialog open={showSaveErrorDialog} onOpenChange={setShowSaveErrorDialog}>
-        <AlertDialogContent className="max-w-sm">
-          <AlertDialogHeader>
-            <AlertDialogTitle className="flex items-center gap-2 text-red-600">
-              <AlertTriangle className="h-5 w-5" /> Save Failed
-            </AlertDialogTitle>
-            <AlertDialogDescription>{saveErrorMsg}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogAction onClick={() => setShowSaveErrorDialog(false)}>
-              OK
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Drive Connect Prompt Dialog */}
-      <AlertDialog open={showDriveConnectPrompt} onOpenChange={setShowDriveConnectPrompt}>
-        <AlertDialogContent className="max-w-sm">
-          <AlertDialogHeader>
-            <AlertDialogTitle className="flex items-center gap-2 text-blue-600">
-              <HardDrive className="h-5 w-5" /> Connect Google Drive
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              Please connect Google Drive first before adding records.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogAction onClick={() => {
-              setShowDriveConnectPrompt(false)
-              setActiveTab("settings")
-              router.push(pathname + "?tab=settings")
-            }}>
-              Go to Settings
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
       {/* ── Year of Assessment Picker ── */}
       <Dialog open={yearPickerOpen} onOpenChange={setYearPickerOpen}>
         <DialogContent className="max-w-xs">
@@ -3884,10 +3799,6 @@ useEffect(() => {
             onClick={() => {
               if (isDemoMode) {
                 toast("Cannot add records in demo mode")
-                return
-              }
-              if (!settings.googleDriveConnected) {
-                setShowDriveConnectPrompt(true)
                 return
               }
               setIsAddModalOpen(true)

@@ -91,6 +91,7 @@ export interface Settings {
   language: Language
   themePreference: ThemePreference
   defaultTaxYear: TaxYear
+  onboardingComplete: boolean
   // EA Form data per Year of Assessment (set when user confirms EA Form)
   eaFormByYear?: Record<number, {
     confirmed: boolean
@@ -280,6 +281,7 @@ export const INITIAL_SETTINGS: Settings = {
   language: 'en',
   themePreference: 'system',
   defaultTaxYear: String(new Date().getFullYear()),
+  onboardingComplete: false,
   eaFormByYear: {},
 }
 
