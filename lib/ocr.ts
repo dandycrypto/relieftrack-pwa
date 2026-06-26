@@ -841,7 +841,7 @@ function inferRecipient(ocrText: string, profile: UserProfile | null): string {
  * Parse all structured fields from raw OCR text.
  * Used by performOCR after server returns minimal {rawText, confidence} payload.
  */
-function parseFromRawText(rawText: string): {
+export function parseFromRawText(rawText: string): {
   amount: number | null
   date: string | null
   time: string | null
