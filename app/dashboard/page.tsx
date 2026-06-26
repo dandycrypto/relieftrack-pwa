@@ -125,7 +125,7 @@ import TaxAssistant from "@/components/TaxAssistant"
 import { parseEWalletCSV, type EWalletProvider, type ParsedTransaction } from "@/lib/ewallet-parser"
 import StatementImport from "@/components/StatementImport"
 import type { DbRecord } from "@/lib/supabase"
-import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, calculateTax, calculateNetTaxBalance, type Record as ReliefRecord } from "@/store"
+import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, computeTax, calculateTax, calculateNetTaxBalance, type Record as ReliefRecord } from "@/store"
 import { createSupabaseBrowserClient } from "@/utils/supabase/client"
 import { performOCR, type OcrResult } from "@/lib/ocr"
 import { verifyRecord, verifyEAForm, findDuplicates, type VerifyResult, type EAFormVerifyResult } from "@/lib/verify"
@@ -196,43 +196,25 @@ function HouseholdOptimiserCard({
 
   const getResult = () => {
     if (spouseIncome <= 0 || gross <= 0) return null
-    // Inline tax computation to avoid import cycle
-    const TAX_BRACKETS = [
-      { max: 5000, rate: 0 }, { max: 20000, rate: 0.01 }, { max: 35000, rate: 0.03 },
-      { max: 50000, rate: 0.08 }, { max: 70000, rate: 0.13 }, { max: 100000, rate: 0.21 },
-      { max: 250000, rate: 0.24 }, { max: 400000, rate: 0.245 }, { max: 600000, rate: 0.25 },
-      { max: 1000000, rate: 0.26 }, { max: 2000000, rate: 0.28 }, { max: Infinity, rate: 0.30 },
-    ]
-    const calcTax = (ci: number) => {
-      if (ci <= 0) return 0
-      let tax = 0, rem = ci, prev = 0
-      for (const b of TAX_BRACKETS) {
-        const slice = Math.min(rem, b.max - prev)
-        if (slice <= 0) break
-        tax += slice * b.rate
-        rem -= slice; prev = b.max
-        if (rem <= 0) break
-      }
-      return Math.floor(tax)
-    }
     const CHILD_RELIEF = (displayProfile.childrenUnder18 || 0) * 2000 + (displayProfile.childrenEducation || 0) * 8000
-    const SPOUSE_RELIEF = !displayProfile.isSpouseWorking ? 4000 : 0
-    const sharedRelief = CHILD_RELIEF + SPOUSE_RELIEF
     const epf = Math.min(eaData?.epf ?? 0, 4000)
+    // ciPrimary: totalClaimed already includes all reliefs (child, spouse, individual)
     const ciPrimary = Math.max(0, gross - epf - 9000 - totalClaimed)
-    const ciPrimaryFull = Math.max(0, gross - epf - 9000 - totalClaimed - sharedRelief)
+    const taxPrimary = computeTax(ciPrimary)
     const ciSpouse = Math.max(0, spouseIncome - Math.min(spouseIncome * 0.11, 4000) - 9000)
-    const totalSeparate = calcTax(ciPrimaryFull) + calcTax(ciSpouse)
-    const ciJoint = Math.max(0, gross + spouseIncome - Math.min((gross + spouseIncome) * 0.11, 8000) - 9000 - totalClaimed - sharedRelief)
-    const totalJoint = calcTax(ciJoint)
+    const taxSpouse = computeTax(ciSpouse)
+    const totalSeparate = taxPrimary + taxSpouse
+    // Joint: combined income, one personal relief, same reliefs as primary
+    const ciJoint = Math.max(0, gross + spouseIncome - Math.min((gross + spouseIncome) * 0.11, 8000) - 9000 - totalClaimed)
+    const totalJoint = computeTax(ciJoint)
     const jointSaving = totalSeparate - totalJoint
-    // Child relief: which spouse benefits more?
-    const ciSpouseChild = Math.max(0, ciSpouse - CHILD_RELIEF)
-    const ciPrimaryChild = Math.max(0, ciPrimary - CHILD_RELIEF)
-    const spouseChildSaving  = CHILD_RELIEF > 0 ? calcTax(ciSpouse) - calcTax(ciSpouseChild) : 0
-    const primaryChildSaving = CHILD_RELIEF > 0 ? calcTax(ciPrimary) - calcTax(ciPrimaryChild) : 0
+    // Child relief: which spouse saves more? Primary baseline adds back child relief (already in totalClaimed)
+    const ciPrimaryNoChild = Math.max(0, ciPrimary + CHILD_RELIEF)
+    const primaryChildSaving = CHILD_RELIEF > 0 ? computeTax(ciPrimaryNoChild) - taxPrimary : 0
+    const ciSpouseWithChild = Math.max(0, ciSpouse - CHILD_RELIEF)
+    const spouseChildSaving = CHILD_RELIEF > 0 ? taxSpouse - computeTax(ciSpouseWithChild) : 0
     const claimWith = spouseChildSaving > primaryChildSaving ? 'spouse' : 'primary'
-    const childSaved = Math.max(spouseChildSaving, primaryChildSaving)
+    const childSaved = Math.max(primaryChildSaving, spouseChildSaving)
     return { totalSeparate, totalJoint, jointSaving, claimWith, childSaved,
       recommendation: jointSaving > 200 ? 'joint' : 'separate' as const,
       rationale: jointSaving > 200 ? `Joint saves RM ${jointSaving.toLocaleString()} combined`

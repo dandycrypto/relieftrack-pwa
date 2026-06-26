@@ -12,11 +12,21 @@ export const maxDuration = 60
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3'
 const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3'
-const CATEGORIES = [
-  'individual', 'medical_self', 'parents_medical', 'disabled', 'disabled_equipment',
-  'spouse', 'children_under18', 'children_education', 'education_self',
-  'lifestyle', 'epf_insurance', 'housing_loan',
-]
+// Must match LHDN_FOLDER_NAMES in lib/google-drive.ts — same names, same order
+const CATEGORY_FOLDER_NAMES: Record<string, string> = {
+  individual:           '01_Individual_Dependent',
+  medical_self:         '02_Medical_Self_Spouse_Child',
+  parents_medical:      '03_Medical_Parents',
+  disabled:             '04_Disabled_Individual',
+  disabled_equipment:   '05_Disabled_Equipment',
+  spouse:               '06_Spouse_Alimony',
+  children_under18:     '07_Children_Under18',
+  children_education:   '08_Children_Higher_Education',
+  education_self:       '09_Education_Self',
+  lifestyle:            '10_Lifestyle',
+  epf_insurance:        '11_EPF_Insurance_Takaful',
+  housing_loan:         '12_First_Home_Loan_Interest',
+}
 
 function authHeaders(token: string) {
   return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
@@ -73,8 +83,8 @@ async function setupDriveFolders(token: string, taxYear: number): Promise<void> 
   const yaMan = await fetch(`${DRIVE_API}/files?q=${encodeURIComponent(`"${ya.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`, { headers: authHeaders(token) }).then((r) => r.json())
   if (!yaMan.files?.length) await createMultipart(token, ya.id, { version: '1.0', updatedAt: new Date().toISOString(), year: taxYear })
   // Category folders + manifests
-  for (const catName of CATEGORIES) {
-    const catFolder = await findOrCreateFolder(token, catName, [ya.id])
+  for (const folderName of Object.values(CATEGORY_FOLDER_NAMES)) {
+    const catFolder = await findOrCreateFolder(token, folderName, [ya.id])
     const manSearch = await fetch(`${DRIVE_API}/files?q=${encodeURIComponent(`"${catFolder.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`, { headers: authHeaders(token) }).then((r) => r.json())
     if (!manSearch.files?.length) await createMultipart(token, catFolder.id, { version: '1.0', updatedAt: new Date().toISOString(), records: [] })
   }

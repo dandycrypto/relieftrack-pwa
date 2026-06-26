@@ -224,8 +224,15 @@ export async function saveCategoryManifest(
   const manifest = { version: '1.0', updatedAt: new Date().toISOString(), records }
 
   if (search.files?.length) {
-    // Update existing — use multipart update
-    await createMultipart(accessToken, categoryFolderId, manifest)
+    // PATCH existing file content (no metadata change needed)
+    const fileId = search.files[0].id
+    const content = new TextEncoder().encode(JSON.stringify(manifest, null, 2))
+    const res = await fetch(`${DRIVE_UPLOAD}/files/${fileId}?uploadType=media`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: content,
+    })
+    if (!res.ok) throw new Error(`manifest update failed: ${res.status}`)
   } else {
     await createMultipart(accessToken, categoryFolderId, manifest)
   }
