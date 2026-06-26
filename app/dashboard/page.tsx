@@ -148,6 +148,7 @@ import {
 import { toast } from "sonner"
 import { v4 as uuidv4 } from "uuid"
 import { formatDistanceToNow } from "date-fns"
+import { useDeviceType } from "@/hooks/use-mobile"
 
 // LHDN Badge Component
 function LHDNBadge() {
@@ -1930,6 +1931,13 @@ useEffect(() => {
   // ═══════════════════════════════════════════════════════════════════════
   const DashboardTab = () => {
     const deadline = getDeadlineInfo()
+    const device = useDeviceType()
+    const isMobile = device === 'mobile'
+    const isTablet = device === 'tablet'
+    const [showFullDashboard, setShowFullDashboard] = useState(false)
+    // Show low-priority widgets on tablet/desktop or when mobile user taps "View full"
+    const showAllWidgets = !isMobile || showFullDashboard
+
     return (
       <ScrollArea className="flex-1 min-h-0">
         <div className="space-y-4 px-3 sm:px-4 pb-8 w-full overflow-x-hidden">
@@ -2169,8 +2177,8 @@ useEffect(() => {
             )
           })()}
 
-          {/* What's Missing — Relief Maximiser (ranked by marginal tax saved) */}
-          {(() => {
+          {/* Low-priority on mobile: Relief Maximiser */}
+          {showAllWidgets && (() => {
             const maxResult = computeMaximiser(displayProfile, settings, displayRecords, reliefTotals)
             const topOps = maxResult.opportunities.slice(0, 5)
             if (topOps.length === 0) return null
@@ -2229,8 +2237,8 @@ useEffect(() => {
             )
           })()}
 
-          {/* What-If Scenario Planner */}
-          {(() => {
+          {/* Low-priority on mobile: What-If Scenario Planner */}
+          {showAllWidgets && (() => {
             const ea = settings.eaFormByYear?.[selectedYear]
             const gross = ea?.grossIncome ?? displayProfile.grossIncome ?? 0
             if (gross <= 0) return null
@@ -2283,8 +2291,8 @@ useEffect(() => {
             )
           })()}
 
-          {/* Monthly Targets & Next-Year Forecast */}
-          {(() => {
+          {/* Low-priority on mobile: Monthly Targets */}
+          {showAllWidgets && (() => {
             const now = new Date()
             const yr = selectedYear
             const isCurrentYear = yr === now.getFullYear()
@@ -2380,8 +2388,8 @@ useEffect(() => {
             </Button>
           </div>
 
-          {/* Year Comparison View */}
-          {showYearComparison && (() => {
+          {/* Low-priority on mobile: Smart Insights + Year Comparison */}
+          {showAllWidgets && showYearComparison && (() => {
             const currentYr = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
             const prevYr = currentYr - 1
             const currentRecs = displayRecords.filter((r) => r.date.startsWith(String(currentYr)))
@@ -2451,8 +2459,19 @@ useEffect(() => {
             </CardContent>
           </Card>
 
-          {/* Smart Insight Cards */}
-          {(() => {
+          {/* Mobile: Show "View full dashboard" button */}
+          {isMobile && !showFullDashboard && (
+            <button
+              onClick={() => setShowFullDashboard(true)}
+              className="w-full flex items-center justify-center gap-2 py-3 rounded-xl border-2 border-dashed border-muted-foreground/30 text-muted-foreground hover:border-primary/40 hover:text-primary transition-colors text-sm font-medium"
+            >
+              <ChevronDown className="h-4 w-4" />
+              View full dashboard
+            </button>
+          )}
+
+          {/* Low-priority on mobile: Smart Insight Cards */}
+          {showAllWidgets && (() => {
             const today = new Date()
             const yearEnd = new Date(`${settings.defaultTaxYear}-12-31`)
             const daysLeft = Math.ceil((yearEnd.getTime() - today.getTime()) / 86400000)
@@ -3247,8 +3266,8 @@ useEffect(() => {
                     }
                   />
                 </div>
-                {/* Household Assessment Optimiser */}
-                {displayProfile.isSpouseWorking && <HouseholdOptimiserCard
+                {/* Low-priority on mobile: Household Optimiser */}
+                {showAllWidgets && displayProfile.isSpouseWorking && <HouseholdOptimiserCard
                   spouseIncomeInput={spouseIncomeInput}
                   setSpouseIncomeInput={setSpouseIncomeInput}
                   selectedYear={selectedYear}
@@ -3707,7 +3726,8 @@ useEffect(() => {
           </Card>
         </div>
 
-        {/* Audit Vault */}
+        {/* Low-priority on mobile: Audit Vault */}
+        {showAllWidgets && (
         <div className="space-y-3">
           <div className="flex items-center gap-2.5 px-1">
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-amber-100 dark:bg-amber-900/40">
@@ -3771,6 +3791,7 @@ useEffect(() => {
             </CardContent>
           </Card>
         </div>
+        )}
 
         {/* About */}
         <div className="space-y-3">
