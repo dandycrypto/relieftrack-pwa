@@ -32,6 +32,14 @@ function authHeaders(token: string) {
   return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 }
 
+async function ensureOk(res: Response): Promise<any> {
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`Drive API error ${res.status}: ${body}`)
+  }
+  return res.json()
+}
+
 async function createMultipart(token: string, folderId: string, manifest: object): Promise<void> {
   const boundary = `boundary_${Date.now()}`
   const metadata = { name: 'manifest.json', mimeType: 'application/json', parents: [folderId] }
@@ -63,13 +71,13 @@ async function findOrCreateFolder(token: string, name: string, parents: string[]
   const search = await fetch(
     `${DRIVE_API}/files?q=${encodeURIComponent(query)}&fields=files(id,name)`,
     { headers: authHeaders(token) }
-  ).then((r) => r.json())
+  ).then(ensureOk)
   if (search.files?.length) return search.files[0]
   const created = await fetch(`${DRIVE_API}/files?fields=id,name,mimeType`, {
     method: 'POST',
     headers: authHeaders(token),
     body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder', parents: parents.length ? parents : undefined }),
-  }).then((r) => r.json())
+  }).then(ensureOk)
   return created
 }
 
@@ -77,15 +85,15 @@ async function setupDriveFolders(token: string, taxYear: number): Promise<void> 
   const root = await findOrCreateFolder(token, 'ReliefTrack MY')
   const ya = await findOrCreateFolder(token, `YA ${taxYear}`, [root.id])
   // Root manifest
-  const rootMan = await fetch(`${DRIVE_API}/files?q=${encodeURIComponent(`"${root.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`, { headers: authHeaders(token) }).then((r) => r.json())
+  const rootMan = await fetch(`${DRIVE_API}/files?q=${encodeURIComponent(`"${root.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`, { headers: authHeaders(token) }).then(ensureOk)
   if (!rootMan.files?.length) await createMultipart(token, root.id, { version: '1.0', updatedAt: new Date().toISOString() })
   // YA manifest
-  const yaMan = await fetch(`${DRIVE_API}/files?q=${encodeURIComponent(`"${ya.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`, { headers: authHeaders(token) }).then((r) => r.json())
+  const yaMan = await fetch(`${DRIVE_API}/files?q=${encodeURIComponent(`"${ya.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`, { headers: authHeaders(token) }).then(ensureOk)
   if (!yaMan.files?.length) await createMultipart(token, ya.id, { version: '1.0', updatedAt: new Date().toISOString(), year: taxYear })
   // Category folders + manifests
   for (const folderName of Object.values(CATEGORY_FOLDER_NAMES)) {
     const catFolder = await findOrCreateFolder(token, folderName, [ya.id])
-    const manSearch = await fetch(`${DRIVE_API}/files?q=${encodeURIComponent(`"${catFolder.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`, { headers: authHeaders(token) }).then((r) => r.json())
+    const manSearch = await fetch(`${DRIVE_API}/files?q=${encodeURIComponent(`"${catFolder.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`, { headers: authHeaders(token) }).then(ensureOk)
     if (!manSearch.files?.length) await createMultipart(token, catFolder.id, { version: '1.0', updatedAt: new Date().toISOString(), records: [] })
   }
 }

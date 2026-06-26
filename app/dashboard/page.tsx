@@ -743,7 +743,9 @@ useEffect(() => {
     try {
       const saved = localStorage.getItem('relief-drive-folder-ids')
       if (saved) setDriveFolderIds(JSON.parse(saved))
-    } catch {}
+    } catch (err) {
+      console.warn('[Dashboard] Failed to parse saved Drive folder IDs from localStorage:', err)
+    }
   }, [])
   const [isDriveLoading, setIsDriveLoading] = useState(false)
   const [driveStorageInfo, setDriveStorageInfo] = useState<{ used: number; total: number } | null>(null)

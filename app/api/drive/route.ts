@@ -36,6 +36,14 @@ function authHeaders(token: string) {
   return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 }
 
+async function ensureOk(res: Response): Promise<any> {
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`Drive API error ${res.status}: ${body}`)
+  }
+  return res.json()
+}
+
 async function createMultipart(
   token: string,
   folderId: string,
@@ -113,7 +121,7 @@ async function findOrCreateFolder(
   const search = await fetch(
     `${DRIVE_API}/files?q=${encodeURIComponent(query)}&fields=files(id,name)`,
     { headers: authHeaders(token) }
-  ).then((r) => r.json())
+  ).then(ensureOk)
 
   if (search.files?.length) return search.files[0]
 
@@ -121,7 +129,7 @@ async function findOrCreateFolder(
     method: 'POST',
     headers: authHeaders(token),
     body: JSON.stringify({ name, mimeType, parents: parents.length ? parents : undefined }),
-  }).then((r) => r.json())
+  }).then(ensureOk)
   return created
 }
 
@@ -136,7 +144,7 @@ async function setupFolders(token: string, taxYear: number) {
   const rootMan = await fetch(
     `${DRIVE_API}/files?q=${encodeURIComponent(`"${root.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`,
     { headers: authHeaders(token) }
-  ).then((r) => r.json())
+  ).then(ensureOk)
   if (!rootMan.files?.length) {
     await createMultipart(token, root.id, { version: '1.0', updatedAt: new Date().toISOString() })
   }
@@ -145,7 +153,7 @@ async function setupFolders(token: string, taxYear: number) {
   const yaMan = await fetch(
     `${DRIVE_API}/files?q=${encodeURIComponent(`"${ya.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`,
     { headers: authHeaders(token) }
-  ).then((r) => r.json())
+  ).then(ensureOk)
   if (!yaMan.files?.length) {
     await createMultipart(token, ya.id, { version: '1.0', updatedAt: new Date().toISOString(), year: taxYear })
   }
@@ -159,7 +167,7 @@ async function setupFolders(token: string, taxYear: number) {
     const manSearch = await fetch(
       `${DRIVE_API}/files?q=${encodeURIComponent(`"${catFolder.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`,
       { headers: authHeaders(token) }
-    ).then((r) => r.json())
+    ).then(ensureOk)
     if (!manSearch.files?.length) {
       await createMultipart(token, catFolder.id, { version: '1.0', updatedAt: new Date().toISOString(), records: [] })
     }
@@ -315,7 +323,10 @@ export async function GET(request: NextRequest) {
       const contentRes = await fetch(`${DRIVE_API}/files/${manifestFile.id}?alt=media`, {
         headers: authHeaders(accessToken),
       })
-      if (!contentRes.ok) continue
+      if (!contentRes.ok) {
+        console.warn(`[Drive GET] Failed to fetch manifest content for "${catFolder.name}": HTTP ${contentRes.status}`)
+        continue
+      }
       try {
         const manifest = await contentRes.json()
         if (manifest.records) {
@@ -323,7 +334,9 @@ export async function GET(request: NextRequest) {
             allRecords.push({ ...rec, _category: catFolder.name })
           }
         }
-      } catch {}
+      } catch (err) {
+        console.warn(`[Drive GET] Failed to parse manifest JSON for "${catFolder.name}":`, err)
+      }
     }
 
     return NextResponse.json({
@@ -396,10 +409,14 @@ export async function POST(request: NextRequest) {
       const res = await fetch(`${DRIVE_API}/files/${fileId}?alt=media`, {
         headers: authHeaders(accessToken!),
       })
-      if (!res.ok) return null
+      if (!res.ok) {
+        console.warn(`[Drive POST] loadManifest failed for "${category}": HTTP ${res.status}`)
+        return null
+      }
       try {
         return await res.json()
-      } catch {
+      } catch (err) {
+        console.warn(`[Drive POST] Failed to parse manifest JSON for "${category}":`, err)
         return null
       }
     }
