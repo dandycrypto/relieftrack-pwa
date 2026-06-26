@@ -170,6 +170,109 @@ function formatRM(amount: number) {
 
 const floorRM = (amount: number): number => Math.floor(amount)
 
+// ─── Household Optimiser Card ─────────────────────────────────────────────────
+
+function HouseholdOptimiserCard({
+  spouseIncomeInput,
+  setSpouseIncomeInput,
+  selectedYear,
+  settings,
+  displayProfile,
+  totalClaimed,
+}: {
+  spouseIncomeInput: string
+  setSpouseIncomeInput: (v: string) => void
+  selectedYear: number
+  settings: import('@/store').Settings
+  displayProfile: import('@/store').Profile
+  totalClaimed: number
+}) {
+  const spouseIncome = parseFloat(spouseIncomeInput) || 0
+  const eaData = settings.eaFormByYear?.[selectedYear]
+  const gross = eaData?.grossIncome ?? displayProfile.grossIncome ?? 0
+
+  const getResult = () => {
+    if (spouseIncome <= 0 || gross <= 0) return null
+    // Inline tax computation to avoid import cycle
+    const TAX_BRACKETS = [
+      { max: 5000, rate: 0 }, { max: 20000, rate: 0.01 }, { max: 35000, rate: 0.03 },
+      { max: 50000, rate: 0.08 }, { max: 70000, rate: 0.13 }, { max: 100000, rate: 0.21 },
+      { max: 250000, rate: 0.24 }, { max: 400000, rate: 0.245 }, { max: 600000, rate: 0.25 },
+      { max: 1000000, rate: 0.26 }, { max: 2000000, rate: 0.28 }, { max: Infinity, rate: 0.30 },
+    ]
+    const calcTax = (ci: number) => {
+      if (ci <= 0) return 0
+      let tax = 0, rem = ci, prev = 0
+      for (const b of TAX_BRACKETS) {
+        const slice = Math.min(rem, b.max - prev)
+        if (slice <= 0) break
+        tax += slice * b.rate
+        rem -= slice; prev = b.max
+        if (rem <= 0) break
+      }
+      return Math.floor(tax)
+    }
+    const CHILD_RELIEF = (displayProfile.childrenUnder18 || 0) * 2000 + (displayProfile.childrenEducation || 0) * 8000
+    const SPOUSE_RELIEF = !displayProfile.isSpouseWorking ? 4000 : 0
+    const sharedRelief = CHILD_RELIEF + SPOUSE_RELIEF
+    const epf = Math.min(eaData?.epf ?? 0, 4000)
+    const ciPrimary = Math.max(0, gross - epf - 9000 - totalClaimed)
+    const ciPrimaryFull = Math.max(0, gross - epf - 9000 - totalClaimed - sharedRelief)
+    const ciSpouse = Math.max(0, spouseIncome - Math.min(spouseIncome * 0.11, 4000) - 9000)
+    const totalSeparate = calcTax(ciPrimaryFull) + calcTax(ciSpouse)
+    const ciJoint = Math.max(0, gross + spouseIncome - Math.min((gross + spouseIncome) * 0.11, 8000) - 9000 - totalClaimed - sharedRelief)
+    const totalJoint = calcTax(ciJoint)
+    const jointSaving = totalSeparate - totalJoint
+    // Child relief: which spouse benefits more?
+    const ciSpouseChild = Math.max(0, ciSpouse - CHILD_RELIEF)
+    const ciPrimaryChild = Math.max(0, ciPrimary - CHILD_RELIEF)
+    const spouseChildSaving  = CHILD_RELIEF > 0 ? calcTax(ciSpouse) - calcTax(ciSpouseChild) : 0
+    const primaryChildSaving = CHILD_RELIEF > 0 ? calcTax(ciPrimary) - calcTax(ciPrimaryChild) : 0
+    const claimWith = spouseChildSaving > primaryChildSaving ? 'spouse' : 'primary'
+    const childSaved = Math.max(spouseChildSaving, primaryChildSaving)
+    return { totalSeparate, totalJoint, jointSaving, claimWith, childSaved,
+      recommendation: jointSaving > 200 ? 'joint' : 'separate' as const,
+      rationale: jointSaving > 200 ? `Joint saves RM ${jointSaving.toLocaleString()} combined`
+        : jointSaving > 0 ? `Joint marginally better (RM ${jointSaving.toLocaleString()})` : 'Separate assessment recommended' }
+  }
+  const result = getResult()
+
+  return (
+    <div className="rounded-xl border border-violet-200 bg-violet-50/50 dark:border-violet-900 dark:bg-violet-950/20 p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-semibold text-violet-700 dark:text-violet-400 shrink-0">Joint vs Separate</p>
+        <Input
+          type="number"
+          placeholder="Spouse gross income (RM)"
+          value={spouseIncomeInput}
+          onChange={e => setSpouseIncomeInput(e.target.value)}
+          className="h-7 text-xs"
+        />
+      </div>
+      {result && (
+        <>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className={`rounded-lg border p-2 ${result.recommendation === 'separate' ? 'border-emerald-400 bg-emerald-50 dark:bg-emerald-950/30' : 'border-border'}`}>
+              <p className="font-semibold">Separate</p>
+              <p className="text-muted-foreground">RM {result.totalSeparate.toLocaleString()}</p>
+            </div>
+            <div className={`rounded-lg border p-2 ${result.recommendation === 'joint' ? 'border-emerald-400 bg-emerald-50 dark:bg-emerald-950/30' : 'border-border'}`}>
+              <p className="font-semibold">Joint</p>
+              <p className="text-muted-foreground">RM {result.totalJoint.toLocaleString()}</p>
+            </div>
+          </div>
+          <p className="text-xs text-violet-700 dark:text-violet-400">{result.rationale}</p>
+          {result.childSaved > 0 && (
+            <p className="text-xs text-muted-foreground">
+              Claim children&apos;s relief under <strong>{result.claimWith}</strong> — saves RM {result.childSaved.toLocaleString()}
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 const getSubCategoryTotal = (records: ReliefRecord[], categoryId: string, subId: string): number => {
   return records
     .filter(r => r.category === categoryId && r.lhdNCategory === subId)
@@ -994,6 +1097,9 @@ useEffect(() => {
   const [nlpInput, setNlpInput] = useState('')
   const [isNlpParsing, setIsNlpParsing] = useState(false)
 
+  // ── Household optimiser ───────────────────────────────────────────────────
+  const [spouseIncomeInput, setSpouseIncomeInput] = useState('')
+
   // ── Phase 3 feature state ─────────────────────────────────────────────────
   const [showTaxAssistant, setShowTaxAssistant] = useState(false)
   const [showYearComparison, setShowYearComparison] = useState(false)
@@ -1581,21 +1687,14 @@ useEffect(() => {
       // Expect: { date, merchant, amount, category, description }
       const parsed = data.parsed ?? data
       if (parsed.amount && parsed.merchant) {
-        setNewRecord({
+        setNewRecord((prev) => ({
+          ...prev,
           date: parsed.date || today,
           merchant: parsed.merchant,
           amount: String(parsed.amount),
           category: parsed.category || 'lifestyle',
           description: parsed.description || nlpInput,
-          status: 'pending',
-          receiptUrl: '',
-          receiptFileName: '',
-          invoiceNumber: '',
-          taxAmount: '',
-          lhdNCategory: '',
-          recipient: 'self',
-          notes: `NLP: "${nlpInput}"`,
-        })
+        }))
         setNlpInput('')
       } else {
         toast.error("Couldn't parse — try: 'paid RM180 dental for mum on 15 Jan'")
@@ -3051,15 +3150,26 @@ useEffect(() => {
             </div>
 
             {displayProfile.maritalStatus === "married" && (
-              <div className="flex items-center justify-between">
-                <Label className="">Spouse Working?</Label>
-                <Switch
-                  checked={displayProfile.isSpouseWorking}
-                  onCheckedChange={(v) =>
-                    handleProfileUpdate({ isSpouseWorking: v })
-                  }
-                />
-              </div>
+              <>
+                <div className="flex items-center justify-between">
+                  <Label className="">Spouse Working?</Label>
+                  <Switch
+                    checked={displayProfile.isSpouseWorking}
+                    onCheckedChange={(v) =>
+                      handleProfileUpdate({ isSpouseWorking: v })
+                    }
+                  />
+                </div>
+                {/* Household Assessment Optimiser */}
+                {displayProfile.isSpouseWorking && <HouseholdOptimiserCard
+                  spouseIncomeInput={spouseIncomeInput}
+                  setSpouseIncomeInput={setSpouseIncomeInput}
+                  selectedYear={selectedYear}
+                  settings={settings}
+                  displayProfile={displayProfile}
+                  totalClaimed={totalClaimed}
+                />}
+              </>
             )}
 
             <Separator />

@@ -1,18 +1,20 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useCallback, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
 import { cn } from "@/lib/utils"
-import { ChevronRight, SkipForward } from "lucide-react"
+import { ChevronRight, SkipForward, Upload, Sparkles } from "lucide-react"
 import { useReliefStore, RELIEF_CATEGORIES } from "@/store"
+import { parseStatement } from "@/lib/statement-parser"
+import { batchFilter } from "@/lib/relevance-filter"
 
 const STEPS = 4
 
 export function OnboardingWizard() {
-  const { profile, updateProfile, settings, updateSettings } = useReliefStore()
+  const { profile, updateProfile, settings, updateSettings, addRecord } = useReliefStore()
   const [step, setStep] = useState(1)
   const [name, setName] = useState(profile.name || "")
   const [income, setIncome] = useState(profile.grossIncome ? String(profile.grossIncome) : "")
@@ -21,6 +23,11 @@ export function OnboardingWizard() {
   )
   const [children, setChildren] = useState(profile.childrenUnder18 || 0)
   const [hasParents, setHasParents] = useState(profile.hasParents || false)
+
+  // Quick-start import state
+  const [quickImportResult, setQuickImportResult] = useState<{ count: number; total: number; items: { date: string; merchant: string; amount: number; category: string }[] } | null>(null)
+  const [quickImporting, setQuickImporting] = useState(false)
+  const quickImportRef = useRef<HTMLInputElement>(null)
 
   const complete = useCallback(() => {
     updateSettings({ onboardingComplete: true })
@@ -31,6 +38,46 @@ export function OnboardingWizard() {
 
   const grossIncome = parseFloat(income) || 0
   const estimatedTaxSavings = Math.min(grossIncome * 0.24 * 0.15, 8000)
+
+  const handleQuickImport = (file: File) => {
+    setQuickImporting(true)
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      try {
+        const text = ev.target?.result as string
+        const { transactions } = parseStatement(text)
+        const filtered = batchFilter(transactions.map(t => ({
+          merchant: t.description || t.merchant,
+          description: t.description,
+          amount: t.amount,
+          date: t.date,
+          rawRow: t.rawRow || '',
+        })))
+        const qualifying = filtered.filter(f => f.relevance.confidence !== 'red')
+        const items = qualifying.map((f) => ({
+          date: f.date,
+          merchant: f.merchant,
+          amount: f.amount,
+          category: f.relevance.suggestedCategory || 'lifestyle',
+        }))
+        const total = items.reduce((s, r) => s + r.amount, 0)
+        setQuickImportResult({ count: items.length, total, items })
+      } catch {
+        setQuickImportResult(null)
+      } finally {
+        setQuickImporting(false)
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  const handleConfirmImport = () => {
+    if (!quickImportResult) return
+    quickImportResult.items.forEach(item => {
+      addRecord({ ...item, description: 'Quick import (onboarding)', status: 'pending' })
+    })
+    complete()
+  }
 
   const handleNext = () => {
     if (step === 1 && name.trim()) {
@@ -235,52 +282,97 @@ export function OnboardingWizard() {
           </div>
         )}
 
-        {/* Step 4 — Relief Potential */}
+        {/* Step 4 — Instant Value (Quick Import) */}
         {step === 4 && (
-          <div className="space-y-6">
-            <div className="space-y-2">
-              <h2 className="text-xl font-bold">
-                {profile.name ? `You're all set, ${profile.name.split(" ")[0]}!` : "You're all set!"}
-              </h2>
-              <p className="text-sm text-muted-foreground">
-                Based on your profile, you can claim up to:
-              </p>
-            </div>
-
-            <div className="rounded-2xl bg-gradient-to-br from-emerald-50 to-emerald-100 p-5 dark:from-emerald-950/40 dark:to-emerald-900/30">
-              <p className="text-3xl font-bold text-emerald-700 dark:text-emerald-300">
-                RM {totalRelief.toLocaleString()}
-              </p>
-              <p className="mt-1 text-sm text-emerald-600 dark:text-emerald-400">
-                in total tax reliefs for YA {currentYear}
-              </p>
-              {grossIncome > 0 && estimatedTaxSavings > 0 && (
-                <p className="mt-3 text-xs text-emerald-600 dark:text-emerald-400">
-                  Estimated savings: up to RM {Math.round(estimatedTaxSavings).toLocaleString()}
-                </p>
-              )}
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">Claimed so far</span>
-                <span className="font-medium">RM 0 / RM {totalRelief.toLocaleString()}</span>
+          <div className="space-y-5">
+            {quickImportResult ? (
+              // ── Found results ──
+              <div className="space-y-5">
+                <div className="rounded-2xl bg-gradient-to-br from-emerald-50 to-emerald-100 p-5 dark:from-emerald-950/40 dark:to-emerald-900/30 text-center">
+                  <div className="flex justify-center mb-2">
+                    <Sparkles className="h-8 w-8 text-emerald-500" />
+                  </div>
+                  <p className="text-3xl font-bold text-emerald-700 dark:text-emerald-300">
+                    RM {Math.round(quickImportResult.total).toLocaleString()}
+                  </p>
+                  <p className="mt-1 text-sm text-emerald-600 dark:text-emerald-400">
+                    found in {quickImportResult.count} qualifying transactions
+                  </p>
+                </div>
+                <div className="max-h-36 overflow-y-auto space-y-1.5 rounded-xl border p-3">
+                  {quickImportResult.items.slice(0, 8).map((item, i) => (
+                    <div key={i} className="flex justify-between text-xs">
+                      <span className="text-muted-foreground truncate max-w-[60%]">{item.merchant}</span>
+                      <span className="font-medium">RM {item.amount.toFixed(2)}</span>
+                    </div>
+                  ))}
+                  {quickImportResult.items.length > 8 && (
+                    <p className="text-xs text-muted-foreground text-center">+{quickImportResult.items.length - 8} more</p>
+                  )}
+                </div>
+                <Button className="h-12 w-full text-base font-semibold" onClick={handleConfirmImport}>
+                  Import & Go to Dashboard →
+                </Button>
+                <button onClick={complete} className="w-full text-center text-sm text-muted-foreground hover:text-foreground transition-colors">
+                  Skip import, go to dashboard
+                </button>
               </div>
-              <Progress value={0} className="h-2" />
-            </div>
+            ) : (
+              // ── Default step 4 ──
+              <div className="space-y-5">
+                <div className="space-y-1">
+                  <h2 className="text-xl font-bold">
+                    {profile.name ? `Almost done, ${profile.name.split(" ")[0]}!` : "Almost done!"}
+                  </h2>
+                  <p className="text-sm text-muted-foreground">
+                    See what you qualify for — instantly.
+                  </p>
+                </div>
 
-            <Button
-              className="h-12 w-full text-base font-semibold"
-              onClick={complete}
-            >
-              Start Adding Receipts →
-            </Button>
-            <button
-              onClick={complete}
-              className="w-full text-center text-sm text-muted-foreground hover:text-foreground transition-colors"
-            >
-              Go to dashboard
-            </button>
+                <div className="rounded-2xl bg-gradient-to-br from-emerald-50 to-emerald-100 p-4 dark:from-emerald-950/40 dark:to-emerald-900/30">
+                  <p className="text-2xl font-bold text-emerald-700 dark:text-emerald-300">
+                    RM {totalRelief.toLocaleString()}
+                  </p>
+                  <p className="mt-0.5 text-sm text-emerald-600 dark:text-emerald-400">
+                    maximum tax reliefs for YA {currentYear}
+                  </p>
+                  {grossIncome > 0 && estimatedTaxSavings > 0 && (
+                    <p className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">
+                      Estimated savings: up to RM {Math.round(estimatedTaxSavings).toLocaleString()}
+                    </p>
+                  )}
+                </div>
+
+                <div className="rounded-xl border-2 border-dashed border-emerald-300 dark:border-emerald-800 p-4 text-center space-y-2">
+                  <p className="text-sm font-medium">Upload a bank statement to see your actual reliefs</p>
+                  <p className="text-xs text-muted-foreground">Maybank, CIMB, Public Bank, RHB, HLB, AmBank CSV — takes &lt;10 seconds</p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-2 border-emerald-400 text-emerald-700 hover:bg-emerald-50 dark:border-emerald-700 dark:text-emerald-400"
+                    disabled={quickImporting}
+                    onClick={() => quickImportRef.current?.click()}
+                  >
+                    <Upload className="h-4 w-4" />
+                    {quickImporting ? 'Scanning…' : 'Quick Import CSV'}
+                  </Button>
+                  <input
+                    ref={quickImportRef}
+                    type="file"
+                    accept=".csv,text/csv"
+                    className="hidden"
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) handleQuickImport(f); e.target.value = "" }}
+                  />
+                </div>
+
+                <Button className="h-12 w-full text-base font-semibold" onClick={complete}>
+                  Start Adding Receipts →
+                </Button>
+                <button onClick={complete} className="w-full text-center text-sm text-muted-foreground hover:text-foreground transition-colors">
+                  Go to dashboard
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
