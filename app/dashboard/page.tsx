@@ -8,7 +8,7 @@
 
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import { useRouter, usePathname, useSearchParams } from "next/navigation"
 import {
   Home,
@@ -62,6 +62,11 @@ import {
   X,
   CheckCircle2,
   CameraOff,
+  BrainCircuit,
+  GitCompare,
+  Sparkles,
+  TrendingUp,
+  Target,
 } from "lucide-react"
 import { useTheme } from "next-themes"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -106,17 +111,29 @@ import {
   DrawerClose,
   DrawerFooter,
 } from "@/components/ui/drawer"
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet"
 import { cn } from "@/lib/utils"
 import { OnboardingWizard } from "@/components/OnboardingWizard"
 import { QrScanner, type QrScanResult } from "@/components/QrScanner"
 import { BulkQueue } from "@/components/BulkQueue"
+import TaxAssistant from "@/components/TaxAssistant"
 import { parseEWalletCSV, type EWalletProvider, type ParsedTransaction } from "@/lib/ewallet-parser"
+import StatementImport from "@/components/StatementImport"
 import type { DbRecord } from "@/lib/supabase"
-import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, calculateTax, calculateNetTaxBalance, type Record as ReliefRecord } from "@/store"
+import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, computeTax, calculateTax, calculateNetTaxBalance, type Record as ReliefRecord } from "@/store"
 import { createSupabaseBrowserClient } from "@/utils/supabase/client"
 import { performOCR, type OcrResult } from "@/lib/ocr"
-import { verifyRecord, verifyEAForm, type VerifyResult, type EAFormVerifyResult } from "@/lib/verify"
-import { exportRecordsCSV, exportRecordsPDF } from "@/lib/export"
+import { verifyRecord, verifyEAForm, findDuplicates, type VerifyResult, type EAFormVerifyResult } from "@/lib/verify"
+import { exportRecordsCSV, exportRecordsPDF, exportLHDNReference, downloadBEWorksheet } from "@/lib/export"
+import { computeMaximiser } from "@/lib/relief-maximiser"
+import { runScenarios, getQuickScenarios } from "@/lib/scenario-planner"
+import { generateTaxReport } from "@/lib/tax-report"
+import { useT } from "@/lib/i18n"
 import {
   PieChart as RechartsPieChart,
   Pie,
@@ -155,6 +172,91 @@ function formatRM(amount: number) {
 }
 
 const floorRM = (amount: number): number => Math.floor(amount)
+
+// ─── Household Optimiser Card ─────────────────────────────────────────────────
+
+function HouseholdOptimiserCard({
+  spouseIncomeInput,
+  setSpouseIncomeInput,
+  selectedYear,
+  settings,
+  displayProfile,
+  totalClaimed,
+}: {
+  spouseIncomeInput: string
+  setSpouseIncomeInput: (v: string) => void
+  selectedYear: number
+  settings: import('@/store').Settings
+  displayProfile: import('@/store').Profile
+  totalClaimed: number
+}) {
+  const spouseIncome = parseFloat(spouseIncomeInput) || 0
+  const eaData = settings.eaFormByYear?.[selectedYear]
+  const gross = eaData?.grossIncome ?? displayProfile.grossIncome ?? 0
+
+  const getResult = () => {
+    if (spouseIncome <= 0 || gross <= 0) return null
+    const CHILD_RELIEF = (displayProfile.childrenUnder18 || 0) * 2000 + (displayProfile.childrenEducation || 0) * 8000
+    const epf = Math.min(eaData?.epf ?? 0, 4000)
+    // ciPrimary: totalClaimed already includes all reliefs (child, spouse, individual)
+    const ciPrimary = Math.max(0, gross - epf - 9000 - totalClaimed)
+    const taxPrimary = computeTax(ciPrimary)
+    const ciSpouse = Math.max(0, spouseIncome - Math.min(spouseIncome * 0.11, 4000) - 9000)
+    const taxSpouse = computeTax(ciSpouse)
+    const totalSeparate = taxPrimary + taxSpouse
+    // Joint: combined income, one personal relief, same reliefs as primary
+    const ciJoint = Math.max(0, gross + spouseIncome - Math.min((gross + spouseIncome) * 0.11, 8000) - 9000 - totalClaimed)
+    const totalJoint = computeTax(ciJoint)
+    const jointSaving = totalSeparate - totalJoint
+    // Child relief: which spouse saves more? Primary baseline adds back child relief (already in totalClaimed)
+    const ciPrimaryNoChild = Math.max(0, ciPrimary + CHILD_RELIEF)
+    const primaryChildSaving = CHILD_RELIEF > 0 ? computeTax(ciPrimaryNoChild) - taxPrimary : 0
+    const ciSpouseWithChild = Math.max(0, ciSpouse - CHILD_RELIEF)
+    const spouseChildSaving = CHILD_RELIEF > 0 ? taxSpouse - computeTax(ciSpouseWithChild) : 0
+    const claimWith = spouseChildSaving > primaryChildSaving ? 'spouse' : 'primary'
+    const childSaved = Math.max(primaryChildSaving, spouseChildSaving)
+    return { totalSeparate, totalJoint, jointSaving, claimWith, childSaved,
+      recommendation: jointSaving > 200 ? 'joint' : 'separate' as const,
+      rationale: jointSaving > 200 ? `Joint saves RM ${jointSaving.toLocaleString()} combined`
+        : jointSaving > 0 ? `Joint marginally better (RM ${jointSaving.toLocaleString()})` : 'Separate assessment recommended' }
+  }
+  const result = getResult()
+
+  return (
+    <div className="rounded-xl border border-violet-200 bg-violet-50/50 dark:border-violet-900 dark:bg-violet-950/20 p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-semibold text-violet-700 dark:text-violet-400 shrink-0">Joint vs Separate</p>
+        <Input
+          type="number"
+          placeholder="Spouse gross income (RM)"
+          value={spouseIncomeInput}
+          onChange={e => setSpouseIncomeInput(e.target.value)}
+          className="h-7 text-xs"
+        />
+      </div>
+      {result && (
+        <>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className={`rounded-lg border p-2 ${result.recommendation === 'separate' ? 'border-emerald-400 bg-emerald-50 dark:bg-emerald-950/30' : 'border-border'}`}>
+              <p className="font-semibold">Separate</p>
+              <p className="text-muted-foreground">RM {result.totalSeparate.toLocaleString()}</p>
+            </div>
+            <div className={`rounded-lg border p-2 ${result.recommendation === 'joint' ? 'border-emerald-400 bg-emerald-50 dark:bg-emerald-950/30' : 'border-border'}`}>
+              <p className="font-semibold">Joint</p>
+              <p className="text-muted-foreground">RM {result.totalJoint.toLocaleString()}</p>
+            </div>
+          </div>
+          <p className="text-xs text-violet-700 dark:text-violet-400">{result.rationale}</p>
+          {result.childSaved > 0 && (
+            <p className="text-xs text-muted-foreground">
+              Claim children&apos;s relief under <strong>{result.claimWith}</strong> — saves RM {result.childSaved.toLocaleString()}
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
 
 const getSubCategoryTotal = (records: ReliefRecord[], categoryId: string, subId: string): number => {
   return records
@@ -458,6 +560,14 @@ export default function ReliefTrackApp() {
     updateTemplate,
     deleteTemplate,
     fireTemplates,
+    merchantMemory,
+    notifications,
+    learnMerchant,
+    recallCategory,
+    addNotification,
+    markNotificationRead,
+    markAllNotificationsRead,
+    clearNotifications,
     getReliefTotals,
     getApplicableReliefs,
     getTotalClaimed,
@@ -472,6 +582,12 @@ export default function ReliefTrackApp() {
   const displayRecords: ReliefRecord[] = isDemoMode ? demoRecords : records
   // Demo mode: use demo profile so real profile is never modified
   const displayProfile = isDemoMode ? demoProfile : profile
+
+  // Privacy-aware RM formatter (masks amounts when privacyMode is on)
+  const fmt = (amount: number) => settings.privacyMode ? 'RM ████' : formatRM(amount)
+
+  // i18n translation helper
+  const t = useT(settings.language ?? 'en')
 
   // Get EA Form data for the CURRENT selected YA
   const getCurrentYearEAForm = () => {
@@ -564,6 +680,54 @@ useEffect(() => {
       window.history.replaceState({}, '', url.pathname + url.search)
       // Folders weren't created — prompt user to retry from Settings
       toast.error('Google Drive connected but folders could not be created. Please try again from Settings.')
+    }
+  }, [isHydrated])
+
+  // ── PWA Share Target pickup ───────────────────────────────────────────────
+  // When another app shares a file/image to ReliefTrack, the share-target route
+  // sets a short-lived cookie. On dashboard mount, we read it and open the add drawer.
+  useEffect(() => {
+    if (!isHydrated) return
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('shared') !== '1') return
+    // Clean URL
+    const url = new URL(window.location.href)
+    url.searchParams.delete('shared')
+    window.history.replaceState({}, '', url.pathname + url.search)
+    // Read shared file from cookie
+    const getCookie = (name: string) => {
+      const match = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`))
+      return match ? decodeURIComponent(match[1]) : null
+    }
+    const metaRaw = getCookie('shared_file_meta')
+    const dataRaw = getCookie('shared_file_data')
+    // Clear cookies
+    document.cookie = 'shared_file_meta=; max-age=0; path=/'
+    document.cookie = 'shared_file_data=; max-age=0; path=/'
+    if (metaRaw && dataRaw) {
+      try {
+        const meta = JSON.parse(metaRaw)
+        const byteStr = atob(dataRaw)
+        const bytes = new Uint8Array(byteStr.length)
+        for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i)
+        const blob = new Blob([bytes], { type: meta.type })
+        const file = new File([blob], meta.name, { type: meta.type })
+        // If it's a CSV, open statement import
+        if (meta.type.includes('csv') || meta.name.endsWith('.csv')) {
+          setIsAddModalOpen(true)
+          setShowStatementImport(true)
+          toast.info('CSV file received — select your bank and import')
+        } else {
+          // It's an image/PDF — trigger OCR
+          setIsAddModalOpen(true)
+          setTimeout(() => {
+            setBulkFiles([file])
+            setShowBulkQueue(true)
+          }, 300)
+        }
+      } catch {
+        toast.error('Could not process shared file')
+      }
     }
   }, [isHydrated])
 
@@ -787,6 +951,26 @@ useEffect(() => {
       toast(`${fired.length} recurring record${fired.length !== 1 ? 's' : ''} added for ${month}`, {
         description: fired.slice(0, 3).join(', ') + (fired.length > 3 ? '…' : ''),
       })
+      addNotification({
+        type: 'recurring',
+        title: `${fired.length} recurring record${fired.length !== 1 ? 's' : ''} added`,
+        body: `${fired.slice(0, 3).join(', ')}${fired.length > 3 ? ` +${fired.length - 3} more` : ''} — ${month}`,
+        actionTab: 'records',
+      })
+    }
+    // Deadline reminder: push once if < 30 days to April 30
+    const taxYr = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+    const filingDeadline = new Date(`${taxYr + 1}-04-30`)
+    const daysToDeadline = Math.ceil((filingDeadline.getTime() - Date.now()) / 86400000)
+    const reminderKey = `deadline-notif-${taxYr}`
+    if (daysToDeadline > 0 && daysToDeadline <= 30 && !localStorage.getItem(reminderKey)) {
+      localStorage.setItem(reminderKey, '1')
+      addNotification({
+        type: 'reminder',
+        title: `Tax filing deadline in ${daysToDeadline} days`,
+        body: `YA ${taxYr} BE form due by 30 April ${taxYr + 1}. Make sure all records are complete.`,
+        actionTab: 'dashboard',
+      })
     }
   }, [isHydrated])
 
@@ -886,6 +1070,7 @@ useEffect(() => {
   const bulkInputRef = useRef<HTMLInputElement>(null)
 
   // ── e-Wallet Import state ─────────────────────────────────────────────────
+  const [showStatementImport, setShowStatementImport] = useState(false)
   const [showEWalletImport, setShowEWalletImport] = useState(false)
   const [ewalletProvider, setEwalletProvider] = useState<EWalletProvider>('tng')
   const [ewalletRows, setEwalletRows] = useState<ParsedTransaction[]>([])
@@ -898,6 +1083,22 @@ useEffect(() => {
   const [newTemplate, setNewTemplate] = useState({
     merchant: '', amount: '', category: 'lifestyle', dayOfMonth: 1, description: '',
   })
+
+  // ── Natural-language quick capture ───────────────────────────────────────
+  const [nlpInput, setNlpInput] = useState('')
+  const [isNlpParsing, setIsNlpParsing] = useState(false)
+
+  // ── Household optimiser ───────────────────────────────────────────────────
+  const [spouseIncomeInput, setSpouseIncomeInput] = useState('')
+
+  // ── Phase 3 feature state ─────────────────────────────────────────────────
+  const [showTaxAssistant, setShowTaxAssistant] = useState(false)
+  const [showYearComparison, setShowYearComparison] = useState(false)
+  const [showNotifications, setShowNotifications] = useState(false)
+  const [duplicateWarning, setDuplicateWarning] = useState<{
+    dupes: ReliefRecord[]
+    pendingFn: () => void
+  } | null>(null)
 
   const cameraInputRef = useRef<HTMLInputElement>(null)
   const galleryInputRef = useRef<HTMLInputElement>(null)
@@ -1254,7 +1455,30 @@ useEffect(() => {
       lhdNCategory: newRecord.lhdNCategory || undefined,
       recipient: newRecord.recipient || undefined,
     }
+
+    // Duplicate detection
+    const dupes = findDuplicates(
+      { merchant: recPayload.merchant, amount: recPayload.amount, date: recPayload.date },
+      records
+    )
+    if (dupes.length > 0) {
+      setIsSaving(false)
+      setDuplicateWarning({
+        dupes,
+        pendingFn: () => {
+          const newId = addRecord(recPayload)
+          learnMerchant(recPayload.merchant, recPayload.category)
+          toast.success("Record added successfully!")
+          closeAddDrawer()
+          syncToDrive('saveRecord', { ...recPayload, id: newId } as ReliefRecord)
+          syncNewRecordToSupabase(newId, recPayload)
+        },
+      })
+      return
+    }
+
     const newId = addRecord(recPayload)
+    learnMerchant(recPayload.merchant, recPayload.category)
     toast.success("Record added successfully!")
     if (!settings.googleDriveConnected && !settings.supabaseUserId) {
       setTimeout(() => toast("Connect Google Drive in Settings to back up your records."), 1200)
@@ -1281,7 +1505,28 @@ useEffect(() => {
       receiptFileName: uploadedFileName || undefined,
       invoiceNumber: reviewData.invoiceNumber || undefined,
     }
+
+    // Duplicate detection
+    const dupes = findDuplicates(
+      { merchant: recPayload.merchant, amount: recPayload.amount, date: recPayload.date },
+      records
+    )
+    if (dupes.length > 0) {
+      setDuplicateWarning({
+        dupes,
+        pendingFn: () => {
+          const newId = addRecord(recPayload)
+          learnMerchant(recPayload.merchant, recPayload.category)
+          toast.success("Record added successfully!")
+          syncNewRecordToSupabase(newId, recPayload)
+          closeAddDrawer()
+        },
+      })
+      return
+    }
+
     const newId = addRecord(recPayload)
+    learnMerchant(recPayload.merchant, recPayload.category)
     toast.success("Record added successfully!")
     if (!settings.googleDriveConnected && !settings.supabaseUserId) {
       setTimeout(() => toast("Connect Google Drive in Settings to back up your records."), 1200)
@@ -1343,6 +1588,7 @@ useEffect(() => {
     setShowEWalletImport(false)
     setEwalletRows([])
     setEwalletSelected(new Set())
+    setShowStatementImport(false)
   }
 
   // ── Export Handlers ────────────────────────────────────────────────────
@@ -1368,6 +1614,122 @@ useEffect(() => {
       toast.success("PDF summary exported!")
     } catch {
       toast.error("Export failed.")
+    }
+  }
+
+  const handleExportTaxReport = () => {
+    try {
+      generateTaxReport(displayRecords, profile, settings, reliefTotals)
+      toast.success("Annual tax report downloaded!")
+    } catch {
+      toast.error("Report generation failed.")
+    }
+  }
+
+  const handleExportLHDN = () => {
+    try {
+      exportLHDNReference(displayRecords, profile, reliefTotals, settings.defaultTaxYear)
+      toast.success("LHDN reference CSV downloaded!")
+    } catch {
+      toast.error("Export failed.")
+    }
+  }
+
+  const handleBEWorksheet = () => {
+    try {
+      const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+      const eaData = settings.eaFormByYear?.[taxYear]
+      const grossIncome = eaData?.grossIncome ?? profile.grossIncome ?? 0
+      const epf = Math.min(eaData?.epf ?? 0, 4000)
+      const socso = Math.min(eaData?.socso ?? 0, 400)
+      const pcb = eaData?.pcb ?? 0
+      const chargeableIncome = Math.max(0, grossIncome - epf - 9000 - totalClaimed)
+      const taxResult = calculateTax(chargeableIncome)
+      downloadBEWorksheet(profile, reliefTotals, {
+        grossIncome, epf, socso, pcb,
+        chargeableIncome,
+        estimatedTax: taxResult.taxBeforeRebate,
+        taxAfterRebate: taxResult.taxAfterRebate,
+        balance: taxResult.taxAfterRebate - pcb,
+      }, String(taxYear))
+      toast.success("e-BE Worksheet opened in new tab — ready to print or copy into MyTax")
+    } catch {
+      toast.error("Failed to generate worksheet.")
+    }
+  }
+
+  const handleNlpCapture = async () => {
+    if (!nlpInput.trim() || isNlpParsing) return
+    setIsNlpParsing(true)
+    try {
+      const today = new Date().toISOString().slice(0, 10)
+      const catList = RELIEF_CATEGORIES.map(c => `${c.id}="${c.name}"`).join(', ')
+      const res = await fetch('/api/ai-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: nlpInput }],
+          context: { mode: 'parse_record', today, categories: catList },
+          parseMode: true,
+        }),
+      })
+      if (!res.ok) throw new Error('API error')
+      const data = await res.json()
+      // Expect: { date, merchant, amount, category, description }
+      const parsed = data.parsed ?? data
+      if (parsed.amount && parsed.merchant) {
+        setNewRecord((prev) => ({
+          ...prev,
+          date: parsed.date || today,
+          merchant: parsed.merchant,
+          amount: String(parsed.amount),
+          category: parsed.category || 'lifestyle',
+          description: parsed.description || nlpInput,
+        }))
+        setNlpInput('')
+      } else {
+        toast.error("Couldn't parse — try: 'paid RM180 dental for mum on 15 Jan'")
+      }
+    } catch {
+      toast.error("AI parse failed — try manual entry")
+    } finally {
+      setIsNlpParsing(false)
+    }
+  }
+
+  const getAuditTaxSummary = () => {
+    const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+    const eaData = settings.eaFormByYear?.[taxYear]
+    const grossIncome = eaData?.grossIncome ?? profile.grossIncome ?? 0
+    const epf = eaData?.epf ?? 0
+    const socso = eaData?.socso ?? 0
+    const pcb = eaData?.pcb ?? 0
+    const chargeableIncome = Math.max(0, grossIncome - Math.min(epf, 4000) - 9000 - totalClaimed)
+    const estimatedTax = 0 // computed in audit-export
+    return { grossIncome, epf, socso, pcb, reliefTotal: totalClaimed, chargeableIncome, estimatedTax, taxAfterRebate: estimatedTax, balance: estimatedTax - pcb }
+  }
+
+  const handleExportAuditExcel = async () => {
+    try {
+      const { generateAuditExcel, downloadAuditExcel } = await import('@/lib/audit-export')
+      const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+      const yearRecords = records.filter((r) => r.date.startsWith(String(taxYear)))
+      const blob = await generateAuditExcel(yearRecords, profile, settings, reliefTotals, getAuditTaxSummary(), taxYear)
+      downloadAuditExcel(blob, taxYear)
+      toast.success(`Audit Excel for YA ${taxYear} downloaded!`)
+    } catch {
+      toast.error("Excel export failed.")
+    }
+  }
+
+  const handleDownloadAuditPack = async () => {
+    try {
+      const { downloadAuditPack } = await import('@/lib/audit-pack')
+      const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+      await downloadAuditPack({ records, profile, settings, reliefTotals, taxYear, taxSummary: getAuditTaxSummary() })
+      toast.success(`YA ${taxYear} audit pack downloaded (3 files)`)
+    } catch {
+      toast.error("Audit pack export failed.")
     }
   }
 
@@ -1573,7 +1935,21 @@ useEffect(() => {
                 <ChevronDown className="h-3 w-3" />
               </button>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
+              {/* Notification Bell */}
+              <Button
+                variant="ghost"
+                size="icon"
+                className="relative h-9 w-9"
+                onClick={() => setShowNotifications(true)}
+              >
+                <Bell className="h-4 w-4" />
+                {notifications.filter((n) => !n.read).length > 0 && (
+                  <span className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[9px] font-bold text-white">
+                    {Math.min(notifications.filter((n) => !n.read).length, 9)}
+                  </span>
+                )}
+              </Button>
               {mounted && (
                 <Button
                   variant="ghost"
@@ -1635,6 +2011,37 @@ useEffect(() => {
             )}
           </div>
 
+          {/* Filing Checklist — personalised items */}
+          {(() => {
+            const yearRecs = displayRecords.filter(r => r.date.startsWith(String(selectedYear)))
+            const missingReceipts = yearRecs.filter(r => !r.receiptUrl && r.category !== 'individual').length
+            const hasEA = !!(settings.eaFormByYear?.[selectedYear]?.grossIncome)
+            const maxResult = computeMaximiser(displayProfile, settings, displayRecords, reliefTotals)
+            const capturable = Math.round(maxResult.potentialSaving)
+            const unclaimedCats = maxResult.opportunities.filter(o => o.claimed === 0).length
+            const items = [
+              !hasEA && { icon: '⚠️', text: 'Add your EA Form income', urgent: true },
+              missingReceipts > 0 && { icon: '📎', text: `${missingReceipts} receipt${missingReceipts > 1 ? 's' : ''} missing`, urgent: missingReceipts > 3 },
+              unclaimedCats > 0 && { icon: '💡', text: `${unclaimedCats} relief categor${unclaimedCats > 1 ? 'ies' : 'y'} not yet claimed`, urgent: false },
+              capturable > 0 && { icon: '💰', text: `RM ${capturable.toLocaleString()} more tax savings available`, urgent: false },
+            ].filter(Boolean) as { icon: string; text: string; urgent: boolean }[]
+            if (items.length === 0) return null
+            return (
+              <div className="rounded-xl border border-amber-200 bg-amber-50/60 dark:border-amber-900 dark:bg-amber-950/20 px-4 py-3 space-y-1.5">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <CalendarClock className="h-3.5 w-3.5 text-amber-600" />
+                  <span className="text-xs font-semibold text-amber-700 dark:text-amber-400">Filing Checklist — YA {selectedYear}</span>
+                </div>
+                {items.map((item, i) => (
+                  <div key={i} className="flex items-start gap-2 text-xs">
+                    <span>{item.icon}</span>
+                    <span className={item.urgent ? 'font-semibold text-amber-800 dark:text-amber-300' : 'text-amber-700 dark:text-amber-400'}>{item.text}</span>
+                  </div>
+                ))}
+              </div>
+            )
+          })()}
+
           {/* TaxSavingsHero — shows Net Tax Balance */}
           {(() => {
             const grossIncome = settings.eaFormByYear?.[selectedYear]?.grossIncome ?? displayProfile.grossIncome ?? 0
@@ -1657,7 +2064,7 @@ useEffect(() => {
             const heroLabel = netTax.status === 'refund' ? 'Expected Tax Refund' : netTax.status === 'owe' ? 'Expected Tax to Pay' : 'Tax Fully Paid ✓'
             return (
               <div className="space-y-1">
-                <p className={cn("text-4xl font-bold", heroColor)}>{formatRM(floorRM(Math.abs(netTax.netBalance)))}</p>
+                <p className={cn("text-4xl font-bold", heroColor)}>{fmt(floorRM(Math.abs(netTax.netBalance)))}</p>
                 <p className={cn("text-sm font-medium", heroColor)}>{heroLabel}</p>
               </div>
             )
@@ -1745,6 +2152,246 @@ useEffect(() => {
 
                   </div>
                 )}
+              </div>
+            )
+          })()}
+
+          {/* What's Missing — Relief Maximiser (ranked by marginal tax saved) */}
+          {(() => {
+            const maxResult = computeMaximiser(displayProfile, settings, displayRecords, reliefTotals)
+            const topOps = maxResult.opportunities.slice(0, 5)
+            if (topOps.length === 0) return null
+            return (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Sparkles className="h-4 w-4 text-amber-500" />
+                    <h2 className="font-semibold text-foreground">{t('reliefMaximiser')}</h2>
+                  </div>
+                  <span className="text-xs text-muted-foreground">
+                    Save up to RM {maxResult.potentialSaving.toLocaleString()} more
+                  </span>
+                </div>
+                <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+                  {topOps.map((op) => (
+                    <button
+                      key={op.categoryId}
+                      onClick={() => {
+                        setNewRecord((prev) => ({ ...prev, category: op.categoryId }))
+                        setIsAddModalOpen(true)
+                      }}
+                      className={`flex shrink-0 flex-col items-start gap-1.5 rounded-xl border px-3 py-2.5 text-left transition-all hover:opacity-90 w-[170px] ${
+                        op.priority === 'high'
+                          ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/30'
+                          : op.priority === 'medium'
+                            ? 'border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30'
+                            : 'border-border bg-muted/30'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between w-full">
+                        <span className="text-[10px] font-semibold text-muted-foreground">{op.beCode}</span>
+                        <span className={`text-[10px] font-bold ${
+                          op.priority === 'high' ? 'text-emerald-600' : op.priority === 'medium' ? 'text-amber-600' : 'text-muted-foreground'
+                        }`}>
+                          {op.marginalRate >= 1 ? `${Math.round(op.marginalRate)}¢/RM` : 'low rate'}
+                        </span>
+                      </div>
+                      <span className="text-sm font-medium text-foreground leading-tight line-clamp-2">{op.label}</span>
+                      <div>
+                        <p className="text-xs text-muted-foreground">RM {op.remaining.toLocaleString()} remaining</p>
+                        {op.taxSaved > 0 && (
+                          <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                            → save RM {op.taxSaved.toLocaleString()} tax
+                          </p>
+                        )}
+                      </div>
+                      <span className="flex items-center gap-1 text-xs text-primary mt-0.5">
+                        <Plus className="h-3 w-3" />
+                        {t('addRecord')}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* What-If Scenario Planner */}
+          {(() => {
+            const ea = settings.eaFormByYear?.[selectedYear]
+            const gross = ea?.grossIncome ?? displayProfile.grossIncome ?? 0
+            if (gross <= 0) return null
+            const quickInputs = getQuickScenarios(reliefTotals, selectedYear, displayProfile)
+            if (quickInputs.length === 0) return null
+            const ciNow = Math.max(0,
+              gross
+              - Math.min(ea?.epf ?? 0, 4000)
+              - 9000
+              - (Object.values(reliefTotals) as number[]).reduce((s: number, v: number) => s + v, 0)
+            )
+            const { scenarios } = runScenarios(ciNow, calculateTax(ciNow).taxAfterRebate, reliefTotals, quickInputs, selectedYear, displayProfile)
+            if (scenarios.length === 0) return null
+            return (
+              <div className="space-y-2">
+                <div className="flex items-center gap-1.5">
+                  <BrainCircuit className="h-4 w-4 text-violet-500" />
+                  <h2 className="font-semibold text-foreground">{t('whatIfScenarios')}</h2>
+                </div>
+                <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
+                  {scenarios.map((s) => (
+                    <div
+                      key={s.categoryId}
+                      className="flex shrink-0 flex-col items-start gap-1.5 rounded-xl border border-violet-200 bg-violet-50 dark:border-violet-900 dark:bg-violet-950/20 px-3 py-2.5 w-[165px]"
+                    >
+                      <span className="text-[10px] font-semibold text-violet-600 dark:text-violet-400">+RM {s.cappedAddition.toLocaleString()}</span>
+                      <span className="text-sm font-medium text-foreground leading-tight line-clamp-2">{s.label}</span>
+                      <div>
+                        <p className="text-xs text-muted-foreground">ROI: {s.roiPercent.toFixed(0)}¢ tax / RM spent</p>
+                        {s.taxSaved > 0 && (
+                          <p className="text-xs font-bold text-violet-600 dark:text-violet-400">
+                            Save RM {s.taxSaved.toLocaleString()}
+                          </p>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => {
+                          setNewRecord((prev) => ({ ...prev, category: s.categoryId }))
+                          setIsAddModalOpen(true)
+                        }}
+                        className="flex items-center gap-1 text-xs text-violet-600 dark:text-violet-400 hover:underline mt-0.5"
+                      >
+                        <Plus className="h-3 w-3" />
+                        {t('addRecord')}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* Monthly Targets & Next-Year Forecast */}
+          {(() => {
+            const now = new Date()
+            const yr = selectedYear
+            const isCurrentYear = yr === now.getFullYear()
+            const monthsElapsed = isCurrentYear ? Math.max(1, now.getMonth() + 1) : 12
+            const totalClaimed = (Object.values(reliefTotals) as number[]).reduce((s: number, v: number) => s + v, 0)
+            const monthlyPace = totalClaimed / monthsElapsed
+            const projectedYearEnd = isCurrentYear ? monthlyPace * 12 : totalClaimed
+            const monthsLeft = isCurrentYear ? Math.max(0, 12 - now.getMonth()) : 0
+            // April 30 deadline
+            const deadline = new Date(yr + 1, 3, 30)
+            const daysToDeadline = Math.ceil((deadline.getTime() - now.getTime()) / 86400000)
+            const weeksLeft = Math.max(1, Math.ceil(daysToDeadline / 7))
+            // Top unclaimed categories with remaining potential
+            const topTargets = applicableReliefs
+              .map((cat) => {
+                const claimed = reliefTotals[cat.id] || 0
+                const limit = cat.perItem
+                  ? cat.id === 'children_under18' ? (displayProfile.childrenUnder18 || 0) * cat.maxLimit
+                  : cat.id === 'children_education' ? (displayProfile.childrenEducation || 0) * cat.maxLimit
+                  : cat.maxLimit
+                  : cat.maxLimit
+                const remaining = Math.max(0, limit - claimed)
+                const weeklyTarget = remaining / weeksLeft
+                return { cat, claimed, limit, remaining, weeklyTarget }
+              })
+              .filter((t) => t.remaining > 0)
+              .sort((a, b) => b.remaining - a.remaining)
+              .slice(0, 3)
+
+            if (topTargets.length === 0) return null
+            return (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-sm font-medium">
+                    <Target className="h-4 w-4 text-sky-500" />
+                    {t('monthlyTargets')}
+                    {isCurrentYear && (
+                      <span className="ml-auto text-xs font-normal text-muted-foreground">
+                        {t('monthsLeft', { n: monthsLeft, year: yr })}
+                      </span>
+                    )}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {/* Pace row */}
+                  <div className="flex items-center justify-between rounded-lg bg-sky-50 dark:bg-sky-950/20 border border-sky-200 dark:border-sky-800 px-3 py-2">
+                    <div className="flex items-center gap-2">
+                      <TrendingUp className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400" />
+                      <span className="text-xs text-sky-700 dark:text-sky-300">{t('monthlyPace')}</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-xs font-semibold text-sky-700 dark:text-sky-300">{fmt(Math.round(monthlyPace))}/mo</span>
+                      {isCurrentYear && (
+                        <p className="text-xs text-muted-foreground">{t('projectedByDec', { amt: fmt(Math.round(projectedYearEnd)) })}</p>
+                      )}
+                    </div>
+                  </div>
+                  {/* Per-category weekly targets */}
+                  <div className="space-y-2">
+                    {topTargets.map(({ cat, claimed, limit, remaining, weeklyTarget }) => (
+                      <div key={cat.id}>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="text-xs text-foreground truncate max-w-[55%]">{cat.name.split(' (')[0]}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {fmt(claimed)} / {fmt(limit)}
+                          </span>
+                        </div>
+                        <Progress value={limit > 0 ? (claimed / limit) * 100 : 0} className="h-1.5" />
+                        {isCurrentYear && weeklyTarget > 0 && (
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {t('addPerWeek', { amt: fmt(Math.ceil(weeklyTarget)) })}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )
+          })()}
+
+          {/* Year Comparison Toggle */}
+          <div className="flex items-center justify-between">
+            <h2 className="font-semibold text-foreground">{t('overview')}</h2>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 text-xs text-muted-foreground"
+              onClick={() => setShowYearComparison(!showYearComparison)}
+            >
+              <GitCompare className="h-3.5 w-3.5" />
+              {t('compareYears')}
+            </Button>
+          </div>
+
+          {/* Year Comparison View */}
+          {showYearComparison && (() => {
+            const currentYr = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+            const prevYr = currentYr - 1
+            const currentRecs = displayRecords.filter((r) => r.date.startsWith(String(currentYr)))
+            const prevRecs = displayRecords.filter((r) => r.date.startsWith(String(prevYr)))
+            const sumRecs = (recs: ReliefRecord[]) => recs.reduce((s, r) => s + r.amount, 0)
+            const catCounts = (recs: ReliefRecord[]) => {
+              const cnt: Record<string, number> = {}
+              recs.forEach((r) => { cnt[r.category] = (cnt[r.category] || 0) + r.amount })
+              const top = Object.entries(cnt).sort((a, b) => b[1] - a[1])[0]
+              return { total: sumRecs(recs), count: recs.length, topCat: top ? RELIEF_CATEGORIES.find(c => c.id === top[0])?.name?.split(' ')[0] : '—' }
+            }
+            const curr = catCounts(currentRecs)
+            const prev = catCounts(prevRecs)
+            return (
+              <div className="grid grid-cols-2 gap-3">
+                {[{ yr: currentYr, data: curr, primary: true }, { yr: prevYr, data: prev, primary: false }].map(({ yr, data, primary }) => (
+                  <div key={yr} className={`rounded-xl border p-3 space-y-1.5 ${primary ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/20' : 'border-muted bg-muted/30'}`}>
+                    <p className={`text-xs font-semibold ${primary ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground'}`}>YA {yr}</p>
+                    <p className="text-lg font-bold text-foreground">RM {data.total.toLocaleString()}</p>
+                    <p className="text-xs text-muted-foreground">{data.count} records</p>
+                    <p className="text-xs text-muted-foreground">Top: {data.topCat}</p>
+                  </div>
+                ))}
               </div>
             )
           })()}
@@ -2037,7 +2684,7 @@ useEffect(() => {
         <div className="relative">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder="Search records..."
+            placeholder={t('searchRecords')}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="pl-9"
@@ -2159,7 +2806,7 @@ useEffect(() => {
                         </div>
                       </div>
 
-                      {/* Amount + Verified + Sync */}
+                      {/* Amount + Verified + Evidence + Sync */}
                       <div className="flex items-center gap-2 shrink-0 min-w-0">
                         <span className="text-sm font-semibold whitespace-nowrap">{formatRM(record.amount)}</span>
                         {record.status === 'verified' ? (
@@ -2167,6 +2814,11 @@ useEffect(() => {
                         ) : (
                           <Clock className="h-3.5 w-3.5 text-amber-500 shrink-0" aria-label="Pending review" />
                         )}
+                        {record.receiptUrl ? (
+                          <Shield className="h-3 w-3 text-emerald-500 shrink-0" aria-label="Receipt attached — audit ready" />
+                        ) : record.category !== 'individual' ? (
+                          <AlertCircle className="h-3 w-3 text-red-400 shrink-0" aria-label="No receipt — not audit ready" />
+                        ) : null}
                         {record.syncedToDrive ? (
                           <Cloud className="h-3 w-3 text-sky-500 shrink-0" aria-label="Synced to Google Drive" />
                         ) : (
@@ -2572,15 +3224,26 @@ useEffect(() => {
             </div>
 
             {displayProfile.maritalStatus === "married" && (
-              <div className="flex items-center justify-between">
-                <Label className="">Spouse Working?</Label>
-                <Switch
-                  checked={displayProfile.isSpouseWorking}
-                  onCheckedChange={(v) =>
-                    handleProfileUpdate({ isSpouseWorking: v })
-                  }
-                />
-              </div>
+              <>
+                <div className="flex items-center justify-between">
+                  <Label className="">Spouse Working?</Label>
+                  <Switch
+                    checked={displayProfile.isSpouseWorking}
+                    onCheckedChange={(v) =>
+                      handleProfileUpdate({ isSpouseWorking: v })
+                    }
+                  />
+                </div>
+                {/* Household Assessment Optimiser */}
+                {displayProfile.isSpouseWorking && <HouseholdOptimiserCard
+                  spouseIncomeInput={spouseIncomeInput}
+                  setSpouseIncomeInput={setSpouseIncomeInput}
+                  selectedYear={selectedYear}
+                  settings={settings}
+                  displayProfile={displayProfile}
+                  totalClaimed={totalClaimed}
+                />}
+              </>
             )}
 
             <Separator />
@@ -2871,7 +3534,7 @@ useEffect(() => {
               <div className="px-5 py-4">
                 <div className="flex items-center gap-2.5">
                   <Globe className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <Label className=" font-medium text-foreground">Language</Label>
+                  <Label className=" font-medium text-foreground">{t('language')}</Label>
                 </div>
                 <Select
                   value={settings.language}
@@ -2882,6 +3545,7 @@ useEffect(() => {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="en">English</SelectItem>
+                    <SelectItem value="ms">Bahasa Malaysia</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -2914,6 +3578,21 @@ useEffect(() => {
                     <SelectItem value="system">System</SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+              <Separator className="bg-border/60" />
+              {/* Privacy Mode */}
+              <div className="flex items-center justify-between px-5 py-4">
+                <div className="flex items-center gap-2.5">
+                  <Fingerprint className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <div>
+                    <Label className="font-medium text-foreground">{t('privacyMode')}</Label>
+                    <p className="text-xs text-muted-foreground">{t('privacyModeDesc')}</p>
+                  </div>
+                </div>
+                <Switch
+                  checked={settings.privacyMode ?? false}
+                  onCheckedChange={(v) => updateSettings({ privacyMode: v })}
+                />
               </div>
               <Separator className="bg-border/60" />
               {/* Default Tax Year */}
@@ -2971,11 +3650,111 @@ useEffect(() => {
               </Button>
               <Button
                 variant="outline"
+                className="h-11 w-full justify-start gap-3 border-purple-200 px-4 font-medium text-purple-700 transition-all hover:border-purple-300 hover:bg-purple-50 dark:border-purple-900 dark:text-purple-400 dark:hover:bg-purple-950/30"
+                onClick={handleExportTaxReport}
+              >
+                <FileText className="h-4 w-4" /> Download Tax Report (PDF)
+              </Button>
+              <Button
+                variant="outline"
+                className="h-11 w-full justify-start gap-3 border-blue-200 px-4 font-medium text-blue-700 transition-all hover:border-blue-300 hover:bg-blue-50 dark:border-blue-900 dark:text-blue-400 dark:hover:bg-blue-950/30"
+                onClick={handleExportLHDN}
+              >
+                <Download className="h-4 w-4" /> LHDN BE Form Reference (CSV)
+              </Button>
+              <Button
+                variant="outline"
+                className="h-11 w-full justify-start gap-3 border-violet-200 px-4 font-medium text-violet-700 transition-all hover:border-violet-300 hover:bg-violet-50 dark:border-violet-900 dark:text-violet-400 dark:hover:bg-violet-950/30"
+                onClick={handleBEWorksheet}
+              >
+                <ExternalLink className="h-4 w-4" /> e-BE Worksheet (MyTax ready)
+              </Button>
+              <Button
+                variant="outline"
+                className="h-11 w-full justify-start gap-3 border-emerald-200 px-4 font-medium text-emerald-700 transition-all hover:border-emerald-300 hover:bg-emerald-50 dark:border-emerald-900 dark:text-emerald-400 dark:hover:bg-emerald-950/30"
+                onClick={handleExportAuditExcel}
+              >
+                <Download className="h-4 w-4" /> Audit Summary Excel (4-sheet)
+              </Button>
+              <Button
+                variant="outline"
+                className="h-11 w-full justify-start gap-3 border-sky-200 px-4 font-medium text-sky-700 transition-all hover:border-sky-300 hover:bg-sky-50 dark:border-sky-900 dark:text-sky-400 dark:hover:bg-sky-950/30"
+                onClick={handleDownloadAuditPack}
+              >
+                <HardDrive className="h-4 w-4" /> Download Audit Pack (PDF + Excel + CSV)
+              </Button>
+              <Button
+                variant="outline"
                 className="h-11 w-full justify-start gap-3 border-red-200 px-4 font-medium text-red-600 transition-all hover:border-red-300 hover:bg-red-50 hover:text-red-700 active:bg-red-100 dark:border-red-900 dark:text-red-400 dark:hover:border-red-800 dark:hover:bg-red-950/40 dark:hover:text-red-300"
                 onClick={() => setShowDeleteDialog(true)}
               >
                 <AlertTriangle className="h-4 w-4" /> Delete All Records
               </Button>
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Audit Vault */}
+        <div className="space-y-3">
+          <div className="flex items-center gap-2.5 px-1">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-amber-100 dark:bg-amber-900/40">
+              <Shield className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+            </div>
+            <h2 className="font-semibold text-foreground">7-Year Audit Vault</h2>
+          </div>
+          <Card className="overflow-hidden border-0 shadow-sm ring-1 ring-border">
+            <CardContent className="p-5 space-y-3">
+              <p className="text-sm text-muted-foreground">
+                LHDN requires tax records to be retained for 7 years. Keep your evidence organised and audit-ready.
+              </p>
+              {/* Per-YA vault cards */}
+              <div className="space-y-2">
+                {Array.from({ length: 4 }, (_, i) => {
+                  const yr = new Date().getFullYear() - i
+                  const yrRecords = records.filter((r) => r.date.startsWith(String(yr)))
+                  const withReceipt = yrRecords.filter((r) => r.receiptUrl).length
+                  const completeness = yrRecords.length > 0 ? Math.round((withReceipt / yrRecords.length) * 100) : 100
+                  const retainUntil = `${yr + 7}-04-30`
+                  const isCurrentYear = yr === parseInt(settings.defaultTaxYear || String(new Date().getFullYear()))
+                  return (
+                    <div key={yr} className={cn(
+                      "rounded-xl border p-3 space-y-2",
+                      isCurrentYear ? "border-amber-200 bg-amber-50/50 dark:border-amber-800 dark:bg-amber-950/20" : "border-border"
+                    )}>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-sm">YA {yr}</span>
+                          {isCurrentYear && <Badge className="text-[10px] px-1.5 py-0 bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">Current</Badge>}
+                        </div>
+                        <span className="text-xs text-muted-foreground">Retain until {retainUntil}</span>
+                      </div>
+                      <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                        <span>{yrRecords.length} records</span>
+                        <span>·</span>
+                        <span className={completeness === 100 ? 'text-emerald-600' : completeness >= 60 ? 'text-amber-600' : 'text-red-500'}>
+                          {completeness}% evidence complete
+                        </span>
+                      </div>
+                      {yrRecords.length > 0 && (
+                        <Progress value={completeness} className="h-1.5" />
+                      )}
+                      {isCurrentYear && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-8 text-xs w-full"
+                          onClick={handleExportAuditExcel}
+                        >
+                          <Download className="h-3.5 w-3.5 mr-1.5" /> Export Excel Audit Summary
+                        </Button>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+              <p className="text-xs text-muted-foreground text-center">
+                Drive sync uploads receipts with LHDN-coded filenames for easy auditor access
+              </p>
             </CardContent>
           </Card>
         </div>
@@ -3271,10 +4050,19 @@ useEffect(() => {
               {/* 3 primary fields */}
               <div className="space-y-3">
                 <div className="space-y-1.5">
-                  <Label className="text-sm font-medium">Merchant</Label>
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm font-medium">Merchant</Label>
+                    {reviewData.vendor && recallCategory(reviewData.vendor) && recallCategory(reviewData.vendor) !== reviewData.category && (
+                      <span className="text-xs text-purple-600 dark:text-purple-400">Memory: {RELIEF_CATEGORIES.find(c => c.id === recallCategory(reviewData.vendor))?.name?.split(' ')[0]}</span>
+                    )}
+                  </div>
                   <Input
                     value={reviewData.vendor}
-                    onChange={(e) => setReviewData({ ...reviewData, vendor: e.target.value })}
+                    onChange={(e) => {
+                      const vendor = e.target.value
+                      const remembered = recallCategory(vendor)
+                      setReviewData({ ...reviewData, vendor, ...(remembered ? { category: remembered } : {}) })
+                    }}
                     className="h-11 font-medium"
                     placeholder="Merchant name"
                   />
@@ -3402,6 +4190,7 @@ useEffect(() => {
           {showBulkQueue && bulkFiles.length > 0 && (
             <BulkQueue
               files={bulkFiles}
+              recallCategory={recallCategory}
               onCancel={() => { setShowBulkQueue(false); setBulkFiles([]) }}
               onDone={(saved, skipped) => {
                 setShowBulkQueue(false)
@@ -3432,6 +4221,39 @@ useEffect(() => {
             />
           )}
 
+          {/* ── Bank Statement Import ── */}
+          {showStatementImport && !showBulkQueue && !showEWalletImport && (
+            <StatementImport
+              onClose={() => setShowStatementImport(false)}
+              onImport={(items) => {
+                let count = 0
+                let skipped = 0
+                items.forEach((item) => {
+                  const dupes = findDuplicates({ merchant: item.merchant, amount: item.amount, date: item.date }, displayRecords)
+                  if (dupes.length > 0) { skipped++; return }
+                  addRecord({
+                    category: item.category,
+                    date: item.date,
+                    amount: item.amount,
+                    merchant: item.merchant,
+                    description: item.description || 'Bank statement import',
+                    status: 'pending',
+                    notes: 'Imported from bank statement',
+                  })
+                  learnMerchant(item.merchant, item.category)
+                  count++
+                })
+                addNotification({
+                  type: 'email_receipt',
+                  title: `${count} statement records imported`,
+                  body: `${count} transactions imported${skipped > 0 ? `, ${skipped} duplicates skipped` : ''}. Review and verify each one.`,
+                  actionTab: 'records',
+                })
+                setIsAddModalOpen(false)
+              }}
+            />
+          )}
+
           {/* ── e-Wallet Import ── */}
           {showEWalletImport && !showBulkQueue && (
             <div className="space-y-4 p-4">
@@ -3442,19 +4264,27 @@ useEffect(() => {
                 </button>
               </div>
               {/* Provider selector */}
-              <div className="flex gap-2">
-                {(['tng', 'grab', 'boost'] as EWalletProvider[]).map((p) => (
+              <div className="grid grid-cols-4 gap-1.5">
+                {([
+                  { id: 'tng',       label: 'TnG' },
+                  { id: 'grab',      label: 'GrabPay' },
+                  { id: 'boost',     label: 'Boost' },
+                  { id: 'shopeepay', label: 'ShopeePay' },
+                  { id: 'mae',       label: 'MAE' },
+                  { id: 'bigpay',    label: 'BigPay' },
+                  { id: 'setel',     label: 'Setel' },
+                ] as { id: EWalletProvider; label: string }[]).map(({ id, label }) => (
                   <button
-                    key={p}
-                    onClick={() => setEwalletProvider(p)}
+                    key={id}
+                    onClick={() => setEwalletProvider(id)}
                     className={cn(
-                      "flex-1 rounded-lg border py-2 text-sm font-medium transition-all",
-                      ewalletProvider === p
+                      "rounded-lg border py-1.5 text-xs font-medium transition-all",
+                      ewalletProvider === id
                         ? "border-emerald-500 bg-emerald-50 text-emerald-700 dark:border-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-300"
                         : "border-border text-muted-foreground hover:border-emerald-300"
                     )}
                   >
-                    {p === 'tng' ? "TnG eWallet" : p === 'grab' ? "GrabPay" : "Boost"}
+                    {label}
                   </button>
                 ))}
               </div>
@@ -3529,9 +4359,12 @@ useEffect(() => {
                     disabled={ewalletSelected.size === 0}
                     onClick={() => {
                       let count = 0
+                      let skipped = 0
                       ewalletSelected.forEach((i) => {
                         const row = ewalletRows[i]
                         const cat = ewalletEditCategories[i] || row.category
+                        const dupes = findDuplicates({ merchant: row.merchant, amount: row.amount, date: row.date }, displayRecords)
+                        if (dupes.length > 0) { skipped++; return }
                         const id = addRecord({
                           category: cat,
                           date: row.date,
@@ -3546,7 +4379,7 @@ useEffect(() => {
                         })
                         count++
                       })
-                      toast.success(`${count} records imported`)
+                      toast.success(`${count} records imported${skipped > 0 ? ` · ${skipped} duplicates skipped` : ''}`)
                       setShowEWalletImport(false)
                       setEwalletRows([])
                       setEwalletSelected(new Set())
@@ -3580,9 +4413,34 @@ useEffect(() => {
           )}
 
           {/* ── Upload Options ── */}
-          {!isProcessing && !showOcrReview && !showOCRForm && !isVerifying && !showQrScanner && !showBulkQueue && !showEWalletImport ? (
+          {!isProcessing && !showOcrReview && !showOCRForm && !isVerifying && !showQrScanner && !showBulkQueue && !showEWalletImport && !showStatementImport ? (
             // Upload options
             <div className="space-y-4 p-4">
+              {/* Natural-language quick capture */}
+              <div className="relative">
+                <input
+                  type="text"
+                  value={nlpInput}
+                  onChange={(e) => setNlpInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleNlpCapture() }}
+                  placeholder='Try: "paid RM180 dental for mum" or "RM2400 laptop Shopee"'
+                  className="w-full rounded-xl border border-violet-200 bg-violet-50/60 px-4 py-3 pr-12 text-sm placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-violet-400 dark:border-violet-900 dark:bg-violet-950/20"
+                />
+                <button
+                  onClick={handleNlpCapture}
+                  disabled={!nlpInput.trim() || isNlpParsing}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-lg bg-violet-500 text-white disabled:opacity-40 hover:bg-violet-600 transition-colors"
+                >
+                  {isNlpParsing
+                    ? <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    : <Sparkles className="h-3.5 w-3.5" />
+                  }
+                </button>
+              </div>
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center"><span className="w-full border-t" /></div>
+                <div className="relative flex justify-center text-xs uppercase"><span className="bg-background px-2 text-muted-foreground">or upload</span></div>
+              </div>
               <Button
                 variant="outline"
                 className="h-24 w-full flex-col gap-2"
@@ -3635,7 +4493,21 @@ useEffect(() => {
                   </svg>
                   <span className="text-sm">Import e-Wallet CSV</span>
                 </div>
-                <span className="text-xs text-muted-foreground">TnG · GrabPay · Boost</span>
+                <span className="text-xs text-muted-foreground">TnG · GrabPay · Boost · ShopeePay · MAE · BigPay · Setel</span>
+              </Button>
+              <Button
+                variant="outline"
+                className="h-16 w-full flex-col gap-1"
+                onClick={() => setShowStatementImport(true)}
+              >
+                <div className="flex items-center gap-2">
+                  <svg className="h-5 w-5 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="2" y="5" width="20" height="14" rx="2" />
+                    <path d="M2 10h20M6 15h4M6 13h2" />
+                  </svg>
+                  <span className="text-sm">Import Bank Statement</span>
+                </div>
+                <span className="text-xs text-muted-foreground">Maybank · CIMB · Public Bank · RHB · HLB · AmBank</span>
               </Button>
               <div className="relative">
                 <div className="absolute inset-0 flex items-center">
@@ -4264,6 +5136,140 @@ useEffect(() => {
           </DrawerFooter>
         </DrawerContent>
       </Drawer>
+
+      {/* ── Notification Center Sheet ── */}
+      <Sheet open={showNotifications} onOpenChange={(v) => !v && setShowNotifications(false)}>
+        <SheetContent side="right" className="w-full sm:w-[380px] p-0 flex flex-col">
+          <SheetHeader className="px-4 py-3 border-b">
+            <div className="flex items-center justify-between">
+              <SheetTitle className="text-base font-semibold">Notifications</SheetTitle>
+              {notifications.length > 0 && (
+                <button
+                  onClick={markAllNotificationsRead}
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                >
+                  Mark all read
+                </button>
+              )}
+            </div>
+          </SheetHeader>
+          <div className="flex-1 overflow-y-auto">
+            {notifications.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground py-16">
+                <Bell className="h-10 w-10 opacity-30" />
+                <p className="text-sm font-medium">All caught up</p>
+                <p className="text-xs opacity-70">No notifications yet</p>
+              </div>
+            ) : (
+              <div className="divide-y">
+                {notifications.map((n) => (
+                  <div
+                    key={n.id}
+                    className={`flex items-start gap-3 px-4 py-3 transition-colors ${n.read ? '' : 'bg-blue-50 dark:bg-blue-950/20'}`}
+                  >
+                    <div className="mt-0.5 text-lg shrink-0">
+                      {n.type === 'milestone' ? '🏆' : n.type === 'reminder' ? '📅' : n.type === 'recurring' ? '🔄' : n.type === 'tip' ? '💡' : '📬'}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-sm font-medium ${n.read ? 'text-foreground' : 'text-foreground'}`}>{n.title}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{n.body}</p>
+                      <p className="text-[10px] text-muted-foreground/60 mt-1">
+                        {formatDistanceToNow(new Date(n.createdAt), { addSuffix: true })}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => markNotificationRead(n.id)}
+                      className="text-muted-foreground/40 hover:text-muted-foreground shrink-0 mt-0.5"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          {notifications.length > 0 && (
+            <div className="px-4 py-3 border-t">
+              <button
+                onClick={clearNotifications}
+                className="text-xs text-red-400 hover:text-red-600 w-full text-center"
+              >
+                Clear all notifications
+              </button>
+            </div>
+          )}
+        </SheetContent>
+      </Sheet>
+
+      {/* ── Duplicate Warning AlertDialog ── */}
+      <AlertDialog open={!!duplicateWarning} onOpenChange={(o) => !o && setDuplicateWarning(null)}>
+        <AlertDialogContent className="max-w-sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2 text-amber-600">
+              <AlertTriangle className="h-5 w-5" /> Possible Duplicate
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div>
+                <p>This looks similar to an existing record:</p>
+                <div className="mt-2 space-y-1">
+                  {(duplicateWarning?.dupes ?? []).slice(0, 3).map((d) => (
+                    <div key={d.id} className="rounded-md bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs">
+                      <span className="font-medium">{d.merchant}</span>
+                      {' · '}{formatRM(d.amount)}{' · '}{d.date}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setDuplicateWarning(null)}>Discard</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-amber-600 hover:bg-amber-700"
+              onClick={() => {
+                duplicateWarning?.pendingFn()
+                setDuplicateWarning(null)
+              }}
+            >
+              Save Anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* ── AI Tax Assistant ── */}
+      <TaxAssistant
+        open={showTaxAssistant}
+        onClose={() => setShowTaxAssistant(false)}
+        context={{
+          taxYear: settings.defaultTaxYear,
+          grossIncome: displayProfile.grossIncome || 0,
+          totalClaimed: totalClaimed,
+          totalPossible: totalPossible,
+          estimatedSavings: estimatedSavings,
+          reliefTotals: reliefTotals,
+          profileName: displayProfile.name || 'there',
+          maritalStatus: displayProfile.maritalStatus || 'single',
+          childrenUnder18: displayProfile.childrenUnder18 || 0,
+          childrenEducation: displayProfile.childrenEducation || 0,
+          hasParents: !!displayProfile.hasParents,
+          isFirstHomeOwner: !!displayProfile.isFirstHomeOwner,
+          recordCount: displayRecords.filter(r => r.date.startsWith(settings.defaultTaxYear)).length,
+          pcbPaid: displayProfile.pcbPaid || 0,
+          chargeableIncome: Math.max(0, (displayProfile.grossIncome || 0) - (displayProfile.epfContribution || 0) - totalClaimed),
+        }}
+      />
+
+      {/* ── Floating Ask AI Button (dashboard tab only) ── */}
+      {activeTab === 'dashboard' && (
+        <button
+          onClick={() => setShowTaxAssistant(true)}
+          className="fixed bottom-[calc(8vh+env(safe-area-inset-bottom)+12px)] right-4 z-40 flex items-center gap-2 rounded-full bg-gradient-to-r from-purple-600 to-violet-600 px-4 py-2.5 text-sm font-medium text-white shadow-lg transition-transform hover:scale-105 active:scale-95"
+        >
+          <BrainCircuit className="h-4 w-4" />
+          Ask AI
+        </button>
+      )}
 
       {/* ── Bottom Navigation ── */}
       <nav className="sticky bottom-0 border-t border-border bg-background/95 backdrop-blur pb-[env(safe-area-inset-bottom)]">

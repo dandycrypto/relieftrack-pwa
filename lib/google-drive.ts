@@ -15,11 +15,24 @@ export interface DriveFolderResult {
   categoryFolderIds: Record<string, string>
 }
 
-const CATEGORIES = [
-  'individual', 'medical_self', 'parents_medical', 'disabled', 'disabled_equipment',
-  'spouse', 'children_under18', 'children_education', 'education_self',
-  'lifestyle', 'epf_insurance', 'housing_loan',
-]
+// LHDN-readable numbered category folder names (for auditors without app access)
+// Format: {##}_{LHDN-name} — mirrors BE form section order
+export const LHDN_FOLDER_NAMES: Record<string, string> = {
+  individual:          '01_Individual_Dependent',
+  medical_self:        '02_Medical_Self_Spouse_Child',
+  parents_medical:     '03_Medical_Parents',
+  disabled:            '04_Disabled_Individual',
+  disabled_equipment:  '05_Disabled_Equipment',
+  spouse:              '06_Spouse_Alimony',
+  children_under18:    '07_Children_Under18',
+  children_education:  '08_Children_Higher_Education',
+  education_self:      '09_Education_Self',
+  lifestyle:           '10_Lifestyle',
+  epf_insurance:       '11_EPF_Insurance_Takaful',
+  housing_loan:        '12_First_Home_Loan_Interest',
+}
+
+const CATEGORIES = Object.keys(LHDN_FOLDER_NAMES)
 
 function authHeaders(accessToken: string) {
   return { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }
@@ -117,33 +130,34 @@ export async function setupDriveFolderStructure(
     await createMultipart(accessToken, yaId, { version: '1.0', updatedAt: new Date().toISOString(), year: taxYear })
   }
 
-  // 5. Category folders + manifests
+  // 5. Category folders + manifests (using LHDN-readable numbered names)
   const categoryFolderIds: Record<string, string> = {}
-  for (const catName of CATEGORIES) {
+  for (const catId of CATEGORIES) {
+    const folderName = LHDN_FOLDER_NAMES[catId] ?? catId
     const catSearch = await fetch(
-      `${DRIVE_API}/files?q=${encodeURIComponent(`"${yaId}" in parents and name="${catName}" and mimeType="application/vnd.google-apps.folder" and trashed=false`)}&fields=files(id,name)`,
+      `${DRIVE_API}/files?q=${encodeURIComponent(`"${yaId}" in parents and name="${folderName}" and mimeType="application/vnd.google-apps.folder" and trashed=false`)}&fields=files(id,name)`,
       { headers: authHeaders(accessToken) }
     ).then((r) => r.json())
 
-    let catId: string
+    let catFolderId: string
     if (catSearch.files?.length) {
-      catId = catSearch.files[0].id
+      catFolderId = catSearch.files[0].id
     } else {
       const created = await fetch(`${DRIVE_API}/files?fields=id,name,mimeType`, {
         method: 'POST',
         headers: authHeaders(accessToken),
-        body: JSON.stringify({ name: catName, mimeType: 'application/vnd.google-apps.folder', parents: [yaId] }),
+        body: JSON.stringify({ name: folderName, mimeType: 'application/vnd.google-apps.folder', parents: [yaId] }),
       }).then((r) => r.json())
-      catId = created.id
+      catFolderId = created.id
     }
-    categoryFolderIds[catName] = catId
+    categoryFolderIds[catId] = catFolderId
 
     const manSearch = await fetch(
-      `${DRIVE_API}/files?q=${encodeURIComponent(`"${catId}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`,
+      `${DRIVE_API}/files?q=${encodeURIComponent(`"${catFolderId}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`,
       { headers: authHeaders(accessToken) }
     ).then((r) => r.json())
     if (!manSearch.files?.length) {
-      await createMultipart(accessToken, catId, { version: '1.0', updatedAt: new Date().toISOString(), records: [] })
+      await createMultipart(accessToken, catFolderId, { version: '1.0', updatedAt: new Date().toISOString(), records: [] })
     }
   }
 
@@ -210,26 +224,39 @@ export async function saveCategoryManifest(
   const manifest = { version: '1.0', updatedAt: new Date().toISOString(), records }
 
   if (search.files?.length) {
-    // Update existing — use multipart update
-    await createMultipart(accessToken, categoryFolderId, manifest)
+    // PATCH existing file content (no metadata change needed)
+    const fileId = search.files[0].id
+    const content = new TextEncoder().encode(JSON.stringify(manifest, null, 2))
+    const res = await fetch(`${DRIVE_UPLOAD}/files/${fileId}?uploadType=media`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: content,
+    })
+    if (!res.ok) throw new Error(`manifest update failed: ${res.status}`)
   } else {
     await createMultipart(accessToken, categoryFolderId, manifest)
   }
 }
 
-/** Upload a receipt file and return the webContentLink */
+/** Upload a receipt file using LHDN-coded filename convention
+ *  Format: YYYY-MM-DD_Merchant_D7_RM850[_SubCat].ext
+ */
 export async function uploadReceiptFile(
   accessToken: string,
   folderId: string,
   file: File,
   date: string,
   merchant: string,
-  amount: number
+  amount: number,
+  beCode?: string,
+  subCat?: string
 ): Promise<string> {
   const ext = file.name.split('.').pop() || 'jpg'
-  const safeDate = date.replace(/\//g, '-')
-  const safeMerchant = merchant.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 20)
-  const fileName = `${safeDate}_${safeMerchant}_RM${amount}.${ext}`
+  const safeDate = date.replace(/\//g, '-').slice(0, 10)
+  const safeMerchant = merchant.replace(/[^a-zA-Z0-9]/g, '').slice(0, 20) || 'Receipt'
+  const amtStr = `RM${Math.round(amount)}`
+  const parts = [safeDate, safeMerchant, beCode || '', amtStr, subCat ? subCat.replace(/[^a-zA-Z0-9]/g, '') : ''].filter(Boolean)
+  const fileName = `${parts.join('_')}.${ext}`
 
   const boundary = `boundary_${Date.now()}`
   const metadataBytes = new TextEncoder().encode(

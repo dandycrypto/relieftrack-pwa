@@ -5,6 +5,25 @@
  */
 
 import type { OcrResult } from '@/types/ocr'
+import type { Record } from '@/store'
+
+// ─── Duplicate Detection ──────────────────────────────────────────────────────
+
+export function findDuplicates(
+  newRecord: { merchant: string; amount: number; date: string },
+  existing: Record[]
+): Record[] {
+  const merchantKey = newRecord.merchant.toLowerCase().trim()
+  const month = newRecord.date.slice(0, 7) // YYYY-MM
+  const lo = newRecord.amount * 0.9
+  const hi = newRecord.amount * 1.1
+  return existing.filter((r) => {
+    if (r.date.slice(0, 7) !== month) return false
+    if (r.merchant.toLowerCase().trim() !== merchantKey) return false
+    if (r.amount < lo || r.amount > hi) return false
+    return true
+  })
+}
 
 export interface VerifyResult {
   status: 'verified' | 'pending'
