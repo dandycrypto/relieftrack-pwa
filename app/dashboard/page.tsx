@@ -65,6 +65,8 @@ import {
   BrainCircuit,
   GitCompare,
   Sparkles,
+  TrendingUp,
+  Target,
 } from "lucide-react"
 import { useTheme } from "next-themes"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -2279,6 +2281,89 @@ useEffect(() => {
                   ))}
                 </div>
               </div>
+            )
+          })()}
+
+          {/* Monthly Targets & Next-Year Forecast */}
+          {(() => {
+            const now = new Date()
+            const yr = selectedYear
+            const isCurrentYear = yr === now.getFullYear()
+            const monthsElapsed = isCurrentYear ? Math.max(1, now.getMonth() + 1) : 12
+            const totalClaimed = (Object.values(reliefTotals) as number[]).reduce((s: number, v: number) => s + v, 0)
+            const monthlyPace = totalClaimed / monthsElapsed
+            const projectedYearEnd = isCurrentYear ? monthlyPace * 12 : totalClaimed
+            const monthsLeft = isCurrentYear ? Math.max(0, 12 - now.getMonth()) : 0
+            // April 30 deadline
+            const deadline = new Date(yr + 1, 3, 30)
+            const daysToDeadline = Math.ceil((deadline.getTime() - now.getTime()) / 86400000)
+            const weeksLeft = Math.max(1, Math.ceil(daysToDeadline / 7))
+            // Top unclaimed categories with remaining potential
+            const topTargets = applicableReliefs
+              .map((cat) => {
+                const claimed = reliefTotals[cat.id] || 0
+                const limit = cat.perItem
+                  ? cat.id === 'children_under18' ? (displayProfile.childrenUnder18 || 0) * cat.maxLimit
+                  : cat.id === 'children_education' ? (displayProfile.childrenEducation || 0) * cat.maxLimit
+                  : cat.maxLimit
+                  : cat.maxLimit
+                const remaining = Math.max(0, limit - claimed)
+                const weeklyTarget = remaining / weeksLeft
+                return { cat, claimed, limit, remaining, weeklyTarget }
+              })
+              .filter((t) => t.remaining > 0)
+              .sort((a, b) => b.remaining - a.remaining)
+              .slice(0, 3)
+
+            if (topTargets.length === 0) return null
+            return (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-sm font-medium">
+                    <Target className="h-4 w-4 text-sky-500" />
+                    Monthly Targets
+                    {isCurrentYear && (
+                      <span className="ml-auto text-xs font-normal text-muted-foreground">
+                        {monthsLeft} months left in {yr}
+                      </span>
+                    )}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {/* Pace row */}
+                  <div className="flex items-center justify-between rounded-lg bg-sky-50 dark:bg-sky-950/20 border border-sky-200 dark:border-sky-800 px-3 py-2">
+                    <div className="flex items-center gap-2">
+                      <TrendingUp className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400" />
+                      <span className="text-xs text-sky-700 dark:text-sky-300">Monthly pace</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-xs font-semibold text-sky-700 dark:text-sky-300">{fmt(Math.round(monthlyPace))}/mo</span>
+                      {isCurrentYear && (
+                        <p className="text-xs text-muted-foreground">≈ {fmt(Math.round(projectedYearEnd))} by Dec</p>
+                      )}
+                    </div>
+                  </div>
+                  {/* Per-category weekly targets */}
+                  <div className="space-y-2">
+                    {topTargets.map(({ cat, claimed, limit, remaining, weeklyTarget }) => (
+                      <div key={cat.id}>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <span className="text-xs text-foreground truncate max-w-[55%]">{cat.name.split(' (')[0]}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {fmt(claimed)} / {fmt(limit)}
+                          </span>
+                        </div>
+                        <Progress value={limit > 0 ? (claimed / limit) * 100 : 0} className="h-1.5" />
+                        {isCurrentYear && weeklyTarget > 0 && (
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            Add ~{fmt(Math.ceil(weeklyTarget))}/wk to max out
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
             )
           })()}
 
