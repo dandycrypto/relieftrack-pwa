@@ -734,7 +734,7 @@ export async function POST(request: NextRequest) {
       if (eaCheck.detected) {
         // Use pdftotext-native parser for cleaner results
         eaFormData = parseEAFormFromPDF(rawText)
-        console.log('[OCR] parseEAFormFromPDF result:', JSON.stringify(eaFormData))
+        // Redacted: do not log full EA form data (may contain PII)
       } else {
         console.log('[OCR] Not detected as EA Form via pdftotext text, skipping')
       }

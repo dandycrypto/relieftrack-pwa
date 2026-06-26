@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 
 // Shared secret set in your email provider webhook config
-const WEBHOOK_SECRET = process.env.EMAIL_WEBHOOK_SECRET || ""
+const WEBHOOK_SECRET = process.env.EMAIL_WEBHOOK_SECRET ?? ""
 
 interface PostmarkAttachment {
   Name: string
@@ -23,16 +23,20 @@ interface PostmarkPayload {
 function extractUserId(payload: PostmarkPayload): string | null {
   const toAddresses = payload.ToFull?.map((t) => t.Email) ?? []
   for (const addr of toAddresses) {
-    const match = addr.match(/receipts\+([a-z0-9]+)@/i)
+    const match = addr.match(/receipts\+([a-f0-9]{8,36})@/i)
     if (match) return match[1]
   }
   return null
 }
 
 export async function POST(req: NextRequest) {
-  // Validate shared secret
-  const secret = req.headers.get("x-webhook-secret") || req.nextUrl.searchParams.get("secret")
-  if (WEBHOOK_SECRET && secret !== WEBHOOK_SECRET) {
+  // Validate shared secret — always require it in production
+  if (!WEBHOOK_SECRET) {
+    console.error('[email-inbound] EMAIL_WEBHOOK_SECRET is not configured')
+    return NextResponse.json({ error: "Webhook not configured" }, { status: 503 })
+  }
+  const secret = req.headers.get("x-webhook-secret")
+  if (!secret || secret !== WEBHOOK_SECRET) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
@@ -89,7 +93,7 @@ export async function POST(req: NextRequest) {
           .select("id")
           .ilike("id", `${userId}%`)
           .limit(1)
-          .single()
+          .maybeSingle()
 
         if (profile?.id) {
           await supabaseAdmin.from("records").insert({
