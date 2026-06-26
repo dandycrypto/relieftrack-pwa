@@ -143,7 +143,7 @@ Category hints: dental/medical/clinic → medical_self; mum/parents → parents_
 async function callMiniMax(
   system: string,
   messages: ChatMessage[],
-  model = 'abab6.5s-chat'
+  model?: string
 ): Promise<string> {
   const apiKey = process.env.MINIMAX_API_KEY
   const baseUrl = process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1'
@@ -152,9 +152,14 @@ async function callMiniMax(
     throw new Error('MINIMAX_API_KEY not configured')
   }
 
+  // Try env-configured model first; fall back to known MiniMax model ids
+  const candidates = [model ?? process.env.MINIMAX_MODEL, 'MiniMax-Text-01', 'abab7-chat'].filter(Boolean) as string[]
+
   const url = `${baseUrl}/chat/completions`
-  const body: Record<string, unknown> = {
-    model,
+  let lastErr = ''
+  for (const candidate of candidates) {
+    const body: Record<string, unknown> = {
+      model: candidate,
     messages: [
       { role: 'system', content: system },
       ...messages.map((m) => ({ role: m.role, content: m.content })),
@@ -172,18 +177,21 @@ async function callMiniMax(
     body: JSON.stringify(body),
   })
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`MiniMax API error ${res.status}: ${err}`)
+    if (res.ok) {
+      const data = await res.json()
+      const reply = data?.choices?.[0]?.message?.content
+      if (reply) {
+        if (candidate !== (model ?? process.env.MINIMAX_MODEL)) {
+          console.log(`[ai-chat] fell back to model ${candidate}`)
+        }
+        return reply
+      }
+    }
+    lastErr = `${res.status}: ${await res.text()}`
+    // unknown model → try next candidate; otherwise break
+    if (!lastErr.includes('unknown model') && !lastErr.includes('2013')) break
   }
-
-  const data = await res.json()
-  // OpenAI-compatible response shape
-  return (
-    data.choices?.[0]?.message?.content ||
-    data.choices?.[0]?.text ||
-    'Sorry, I could not generate a response. Please try again.'
-  )
+  throw new Error(`MiniMax API error ${lastErr}`)
 }
 
 // ─── Route Handler ────────────────────────────────────────────────────────────
