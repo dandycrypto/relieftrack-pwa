@@ -28,6 +28,10 @@ interface TaxContext {
   recordCount: number
   pcbPaid?: number
   chargeableIncome?: number
+  /** Set by dashboard — true when user is in demo mode (?demo=true) */
+  isDemo?: boolean
+  /** Stable session ID for demo message counter */
+  demoSessionId?: string
 }
 
 interface TaxAssistantProps {
@@ -47,6 +51,8 @@ export default function TaxAssistant({ open, onClose, context }: TaxAssistantPro
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [demoRemaining, setDemoRemaining] = useState<number | null>(null)
+  const [demoError, setDemoError] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -80,10 +86,31 @@ export default function TaxAssistant({ open, onClose, context }: TaxAssistantPro
         body: JSON.stringify({ messages: newMessages, context }),
       })
       const data = await res.json()
+
+      // Demo guard: blocked prompt (403) or limit reached (429)
+      if ((res.status === 403 && data.demoBlocked) || (res.status === 429 && data.demoLimitReached)) {
+        handleDemoError(data.error, data.remaining ?? 0)
+        setLoading(false)
+        return
+      }
+
+      if (!res.ok) {
+        setMessages((prev) => [...prev, {
+          role: 'assistant',
+          content: data.error || `Request failed (${res.status}). Please try again.`,
+        }])
+        setLoading(false)
+        return
+      }
+
       setMessages((prev) => [...prev, {
         role: 'assistant',
         content: data.reply || 'Sorry, I encountered an error. Please try again.',
       }])
+      // Update demo remaining if returned
+      if (data.remaining !== undefined) {
+        setDemoRemaining(data.remaining)
+      }
     } catch {
       setMessages((prev) => [...prev, {
         role: 'assistant',
@@ -93,6 +120,16 @@ export default function TaxAssistant({ open, onClose, context }: TaxAssistantPro
       setLoading(false)
     }
   }, [messages, loading, context])
+
+  // Handle demo-mode error responses (403/429)
+  const handleDemoError = (errMsg: string, remaining: number) => {
+    setDemoError(errMsg)
+    setDemoRemaining(remaining)
+    setMessages((prev) => [...prev, {
+      role: 'assistant',
+      content: errMsg,
+    }])
+  }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -157,8 +194,23 @@ export default function TaxAssistant({ open, onClose, context }: TaxAssistantPro
           <div ref={bottomRef} />
         </div>
 
+        {/* Demo mode banner */}
+        {context.isDemo && demoRemaining !== null && (
+          <div className="px-4 pb-2">
+            <div className={`text-xs px-3 py-2 rounded-lg text-center ${
+              demoRemaining > 0
+                ? 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
+                : 'bg-red-50 text-red-600 dark:bg-red-900/30 dark:text-red-400'
+            }`}>
+              {demoRemaining > 0
+                ? `🤖 Demo mode — ${demoRemaining} message${demoRemaining !== 1 ? 's' : ''} remaining`
+                : 'Demo messages exhausted — sign up for unlimited AI assistance'}
+            </div>
+          </div>
+        )}
+
         {/* Starter Chips (only when no user messages) */}
-        {messages.length <= 1 && (
+        {messages.length <= 1 && !demoError && (
           <div className="px-4 pb-2 flex flex-wrap gap-1.5">
             {STARTERS.map((s) => (
               <button

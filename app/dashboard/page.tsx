@@ -1095,6 +1095,17 @@ useEffect(() => {
 
   // ── Phase 3 feature state ─────────────────────────────────────────────────
   const [showTaxAssistant, setShowTaxAssistant] = useState(false)
+  // Stable session ID for demo message counter — generated once per browser session
+  const [demoSessionId] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const stored = sessionStorage.getItem('demo-session-id')
+      if (stored) return stored
+      const id = `demo-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      sessionStorage.setItem('demo-session-id', id)
+      return id
+    }
+    return 'demo-server'
+  })
   const [showYearComparison, setShowYearComparison] = useState(false)
   const [showNotifications, setShowNotifications] = useState(false)
   const [duplicateWarning, setDuplicateWarning] = useState<{
@@ -5259,6 +5270,8 @@ useEffect(() => {
           recordCount: displayRecords.filter(r => r.date.startsWith(settings.defaultTaxYear)).length,
           pcbPaid: displayProfile.pcbPaid || 0,
           chargeableIncome: Math.max(0, (displayProfile.grossIncome || 0) - (displayProfile.epfContribution || 0) - totalClaimed),
+          isDemo: isDemoMode,
+          demoSessionId,
         }}
       />
 
