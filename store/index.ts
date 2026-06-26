@@ -115,6 +115,7 @@ export interface Settings {
   onboardingComplete: boolean
   supabaseUserId: string | null
   emailForwardingAddress: string
+  privacyMode: boolean   // hides all monetary amounts on screen
   // EA Form data per Year of Assessment (set when user confirms EA Form)
   eaFormByYear?: Record<number, {
     confirmed: boolean
@@ -307,6 +308,7 @@ export const INITIAL_SETTINGS: Settings = {
   onboardingComplete: false,
   supabaseUserId: null,
   emailForwardingAddress: '',
+  privacyMode: false,
   eaFormByYear: {},
 }
 

@@ -598,6 +598,9 @@ export default function ReliefTrackApp() {
   // Demo mode: use demo profile so real profile is never modified
   const displayProfile = isDemoMode ? demoProfile : profile
 
+  // Privacy-aware RM formatter (masks amounts when privacyMode is on)
+  const fmt = (amount: number) => settings.privacyMode ? 'RM ████' : formatRM(amount)
+
   // Get EA Form data for the CURRENT selected YA
   const getCurrentYearEAForm = () => {
     const year = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
@@ -2073,7 +2076,7 @@ useEffect(() => {
             const heroLabel = netTax.status === 'refund' ? 'Expected Tax Refund' : netTax.status === 'owe' ? 'Expected Tax to Pay' : 'Tax Fully Paid ✓'
             return (
               <div className="space-y-1">
-                <p className={cn("text-4xl font-bold", heroColor)}>{formatRM(floorRM(Math.abs(netTax.netBalance)))}</p>
+                <p className={cn("text-4xl font-bold", heroColor)}>{fmt(floorRM(Math.abs(netTax.netBalance)))}</p>
                 <p className={cn("text-sm font-medium", heroColor)}>{heroLabel}</p>
               </div>
             )
@@ -3503,6 +3506,21 @@ useEffect(() => {
                     <SelectItem value="system">System</SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+              <Separator className="bg-border/60" />
+              {/* Privacy Mode */}
+              <div className="flex items-center justify-between px-5 py-4">
+                <div className="flex items-center gap-2.5">
+                  <Fingerprint className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <div>
+                    <Label className="font-medium text-foreground">Privacy Mode</Label>
+                    <p className="text-xs text-muted-foreground">Hide all RM amounts on screen</p>
+                  </div>
+                </div>
+                <Switch
+                  checked={settings.privacyMode ?? false}
+                  onCheckedChange={(v) => updateSettings({ privacyMode: v })}
+                />
               </div>
               <Separator className="bg-border/60" />
               {/* Default Tax Year */}
