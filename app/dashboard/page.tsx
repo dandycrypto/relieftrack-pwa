@@ -133,6 +133,7 @@ import { exportRecordsCSV, exportRecordsPDF, exportLHDNReference, downloadBEWork
 import { computeMaximiser } from "@/lib/relief-maximiser"
 import { runScenarios, getQuickScenarios } from "@/lib/scenario-planner"
 import { generateTaxReport } from "@/lib/tax-report"
+import { useT } from "@/lib/i18n"
 import {
   PieChart as RechartsPieChart,
   Pie,
@@ -602,6 +603,9 @@ export default function ReliefTrackApp() {
 
   // Privacy-aware RM formatter (masks amounts when privacyMode is on)
   const fmt = (amount: number) => settings.privacyMode ? 'RM ████' : formatRM(amount)
+
+  // i18n translation helper
+  const t = useT(settings.language ?? 'en')
 
   // Get EA Form data for the CURRENT selected YA
   const getCurrentYearEAForm = () => {
@@ -2180,7 +2184,7 @@ useEffect(() => {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-1.5">
                     <Sparkles className="h-4 w-4 text-amber-500" />
-                    <h2 className="font-semibold text-foreground">Relief Maximiser</h2>
+                    <h2 className="font-semibold text-foreground">{t('reliefMaximiser')}</h2>
                   </div>
                   <span className="text-xs text-muted-foreground">
                     Save up to RM {maxResult.potentialSaving.toLocaleString()} more
@@ -2221,7 +2225,7 @@ useEffect(() => {
                       </div>
                       <span className="flex items-center gap-1 text-xs text-primary mt-0.5">
                         <Plus className="h-3 w-3" />
-                        Add Record
+                        {t('addRecord')}
                       </span>
                     </button>
                   ))}
@@ -2249,7 +2253,7 @@ useEffect(() => {
               <div className="space-y-2">
                 <div className="flex items-center gap-1.5">
                   <BrainCircuit className="h-4 w-4 text-violet-500" />
-                  <h2 className="font-semibold text-foreground">What-If Scenarios</h2>
+                  <h2 className="font-semibold text-foreground">{t('whatIfScenarios')}</h2>
                 </div>
                 <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
                   {scenarios.map((s) => (
@@ -2275,7 +2279,7 @@ useEffect(() => {
                         className="flex items-center gap-1 text-xs text-violet-600 dark:text-violet-400 hover:underline mt-0.5"
                       >
                         <Plus className="h-3 w-3" />
-                        Add Record
+                        {t('addRecord')}
                       </button>
                     </div>
                   ))}
@@ -2321,10 +2325,10 @@ useEffect(() => {
                 <CardHeader className="pb-2">
                   <CardTitle className="flex items-center gap-2 text-sm font-medium">
                     <Target className="h-4 w-4 text-sky-500" />
-                    Monthly Targets
+                    {t('monthlyTargets')}
                     {isCurrentYear && (
                       <span className="ml-auto text-xs font-normal text-muted-foreground">
-                        {monthsLeft} months left in {yr}
+                        {t('monthsLeft', { n: monthsLeft, year: yr })}
                       </span>
                     )}
                   </CardTitle>
@@ -2334,12 +2338,12 @@ useEffect(() => {
                   <div className="flex items-center justify-between rounded-lg bg-sky-50 dark:bg-sky-950/20 border border-sky-200 dark:border-sky-800 px-3 py-2">
                     <div className="flex items-center gap-2">
                       <TrendingUp className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400" />
-                      <span className="text-xs text-sky-700 dark:text-sky-300">Monthly pace</span>
+                      <span className="text-xs text-sky-700 dark:text-sky-300">{t('monthlyPace')}</span>
                     </div>
                     <div className="text-right">
                       <span className="text-xs font-semibold text-sky-700 dark:text-sky-300">{fmt(Math.round(monthlyPace))}/mo</span>
                       {isCurrentYear && (
-                        <p className="text-xs text-muted-foreground">≈ {fmt(Math.round(projectedYearEnd))} by Dec</p>
+                        <p className="text-xs text-muted-foreground">{t('projectedByDec', { amt: fmt(Math.round(projectedYearEnd)) })}</p>
                       )}
                     </div>
                   </div>
@@ -2356,7 +2360,7 @@ useEffect(() => {
                         <Progress value={limit > 0 ? (claimed / limit) * 100 : 0} className="h-1.5" />
                         {isCurrentYear && weeklyTarget > 0 && (
                           <p className="text-xs text-muted-foreground mt-0.5">
-                            Add ~{fmt(Math.ceil(weeklyTarget))}/wk to max out
+                            {t('addPerWeek', { amt: fmt(Math.ceil(weeklyTarget)) })}
                           </p>
                         )}
                       </div>
@@ -2369,7 +2373,7 @@ useEffect(() => {
 
           {/* Year Comparison Toggle */}
           <div className="flex items-center justify-between">
-            <h2 className="font-semibold text-foreground">Overview</h2>
+            <h2 className="font-semibold text-foreground">{t('overview')}</h2>
             <Button
               variant="ghost"
               size="sm"
@@ -2377,7 +2381,7 @@ useEffect(() => {
               onClick={() => setShowYearComparison(!showYearComparison)}
             >
               <GitCompare className="h-3.5 w-3.5" />
-              Compare Years
+              {t('compareYears')}
             </Button>
           </div>
 
@@ -2698,7 +2702,7 @@ useEffect(() => {
         <div className="relative">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder="Search records..."
+            placeholder={t('searchRecords')}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="pl-9"
@@ -3548,7 +3552,7 @@ useEffect(() => {
               <div className="px-5 py-4">
                 <div className="flex items-center gap-2.5">
                   <Globe className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <Label className=" font-medium text-foreground">Language</Label>
+                  <Label className=" font-medium text-foreground">{t('language')}</Label>
                 </div>
                 <Select
                   value={settings.language}
@@ -3559,6 +3563,7 @@ useEffect(() => {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="en">English</SelectItem>
+                    <SelectItem value="ms">Bahasa Malaysia</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -3598,8 +3603,8 @@ useEffect(() => {
                 <div className="flex items-center gap-2.5">
                   <Fingerprint className="h-4 w-4 shrink-0 text-muted-foreground" />
                   <div>
-                    <Label className="font-medium text-foreground">Privacy Mode</Label>
-                    <p className="text-xs text-muted-foreground">Hide all RM amounts on screen</p>
+                    <Label className="font-medium text-foreground">{t('privacyMode')}</Label>
+                    <p className="text-xs text-muted-foreground">{t('privacyModeDesc')}</p>
                   </div>
                 </div>
                 <Switch
