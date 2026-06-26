@@ -3,7 +3,7 @@
  * Cache-first strategy for static assets
  */
 
-const CACHE_NAME = 'relieftrack-v2';
+const CACHE_NAME = 'relieftrack-v3';
 const OFFLINE_URL = '/';
 
 // Assets to cache on install

@@ -122,6 +122,7 @@ import { OnboardingWizard } from "@/components/OnboardingWizard"
 import { QrScanner, type QrScanResult } from "@/components/QrScanner"
 import { BulkQueue } from "@/components/BulkQueue"
 import TaxAssistant from "@/components/TaxAssistant"
+import InstallPWA from "@/components/InstallPWA"
 import { parseEWalletCSV, type EWalletProvider, type ParsedTransaction } from "@/lib/ewallet-parser"
 import StatementImport from "@/components/StatementImport"
 import type { DbRecord } from "@/lib/supabase"
@@ -4020,6 +4021,9 @@ useEffect(() => {
   // ═══════════════════════════════════════════════════════════════════════
   return (
     <div className="flex h-[100svh] w-full flex-col bg-background">
+
+      {/* PWA Install Banner (Android) + iOS hint — mobile/tablet only */}
+      <InstallPWA />
 
       {/* First-run onboarding wizard — shown once, skipped for demo and returning users */}
       {isHydrated && !settings.onboardingComplete && records.length === 0 && !isDemoMode && (
