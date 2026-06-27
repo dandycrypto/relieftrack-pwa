@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import fs from 'fs'
+import { requireAuth } from '@/lib/api-auth'
 
 const PROFILE_DIR = '/tmp/relieftrack-profiles'
 
@@ -8,25 +9,6 @@ function profilePath(userId: string): string {
   const safe = userId.replace(/[^a-zA-Z0-9_-]/g, '')
   if (!safe) throw new Error('Invalid user id')
   return `${PROFILE_DIR}/${safe}.json`
-}
-
-// ── Auth helper (mirrors /api/drive pattern) ─────────────────────────────────
-async function requireAuth(request: NextRequest) {
-  const { createServerClient } = require('@supabase/ssr')
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        get: (name: string) => request.cookies.get(name)?.value,
-        set: () => {},
-        remove: () => {},
-      },
-    }
-  )
-  const { data: { user }, error: authError } = await supabase.auth.getUser()
-  if (authError || !user) return null
-  return user
 }
 
 export async function POST(request: NextRequest) {

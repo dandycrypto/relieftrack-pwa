@@ -126,7 +126,7 @@ import InstallPWA from "@/components/InstallPWA"
 import { parseEWalletCSV, type EWalletProvider, type ParsedTransaction } from "@/lib/ewallet-parser"
 import StatementImport from "@/components/StatementImport"
 import type { DbRecord } from "@/lib/supabase"
-import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, computeTax, calculateTax, calculateNetTaxBalance, type Record as ReliefRecord } from "@/store"
+import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, computeTax, calculateTax, calculateNetTaxBalance, floorRM, type Record as ReliefRecord } from "@/store"
 import { createSupabaseBrowserClient } from "@/utils/supabase/client"
 import { performOCR, type OcrResult } from "@/lib/ocr"
 import { verifyRecord, verifyEAForm, findDuplicates, type VerifyResult, type EAFormVerifyResult } from "@/lib/verify"
@@ -172,8 +172,6 @@ function LHDNBadge() {
 function formatRM(amount: number) {
   return `RM ${amount.toLocaleString()}`
 }
-
-const floorRM = (amount: number): number => Math.floor(amount)
 
 // ─── Household Optimiser Card ─────────────────────────────────────────────────
 
