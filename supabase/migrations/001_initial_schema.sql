@@ -176,10 +176,13 @@ CREATE TABLE public.drive_connections (
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT one_active_connection UNIQUE (user_id) WHERE is_active = TRUE
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Partial unique index (not a table CONSTRAINT — PostgreSQL doesn't support
+-- WHERE clauses on table-level UNIQUE constraints) enforcing at most one
+-- active Drive connection per user.
+CREATE UNIQUE INDEX one_active_connection ON public.drive_connections(user_id) WHERE is_active = TRUE;
 
 -- ============================================================================
 -- INDEXES

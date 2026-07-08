@@ -4,7 +4,12 @@
 #   apt-get install poppler-utils   (Debian/Ubuntu)
 #   brew install poppler             (macOS)
 
-rapidocr-onnxruntime>=1.4.0
+# rapidocr (not the older rapidocr-onnxruntime package) — provides the
+# `from rapidocr import RapidOCR` import used by ocr_service/ocr_engine.py
+# and scripts/ocr_rapid.py. It no longer bundles an inference engine, so
+# onnxruntime must be listed explicitly.
+rapidocr>=2.0.0
+onnxruntime>=1.18.0
 opencv-python-headless>=4.9.0
 pdfplumber>=0.11.0
 pdf2image>=1.17.0

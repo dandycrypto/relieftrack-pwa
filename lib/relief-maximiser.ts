@@ -7,7 +7,7 @@
  */
 
 import { computeTax, RELIEF_CATEGORIES } from '@/store'
-import type { Profile, Settings, Record } from '@/store'
+import type { Profile, Settings, ReliefRecord } from '@/store'
 import { getEligibleRules, getEffectiveCap } from '@/lib/lhdn-rules'
 
 export interface ReliefOpportunity {
@@ -31,7 +31,7 @@ export interface MaximiserResult {
   opportunities:      ReliefOpportunity[]
 }
 
-function chargeableIncome(profile: Profile, settings: Settings, records: Record[]): number {
+function chargeableIncome(profile: Profile, settings: Settings, records: ReliefRecord[]): number {
   const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
   const ea = settings.eaFormByYear?.[taxYear]
   const gross = ea?.grossIncome ?? profile.grossIncome ?? 0
@@ -50,7 +50,7 @@ function chargeableIncome(profile: Profile, settings: Settings, records: Record[
 export function computeMaximiser(
   profile:    Profile,
   settings:   Settings,
-  records:    Record[],
+  records:    ReliefRecord[],
   reliefTotals: Record<string, number>
 ): MaximiserResult {
   const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()

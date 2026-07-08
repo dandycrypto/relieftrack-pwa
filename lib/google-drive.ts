@@ -265,8 +265,8 @@ export async function uploadReceiptFile(
   const safeDate = date.replace(/\//g, '-').slice(0, 10)
   const safeMerchant = merchant.replace(/[^a-zA-Z0-9]/g, '').slice(0, 20) || 'Receipt'
   const amtStr = `RM${Math.round(amount)}`
-  const parts = [safeDate, safeMerchant, beCode || '', amtStr, subCat ? subCat.replace(/[^a-zA-Z0-9]/g, '') : ''].filter(Boolean)
-  const fileName = `${parts.join('_')}.${ext}`
+  const fileNameParts = [safeDate, safeMerchant, beCode || '', amtStr, subCat ? subCat.replace(/[^a-zA-Z0-9]/g, '') : ''].filter(Boolean)
+  const fileName = `${fileNameParts.join('_')}.${ext}`
 
   const boundary = `boundary_${Date.now()}`
   const metadataBytes = new TextEncoder().encode(

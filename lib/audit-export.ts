@@ -4,7 +4,7 @@
  * Uses SheetJS (xlsx) — open-source licensed
  */
 
-import type { Record, Profile, Settings } from '@/store'
+import type { ReliefRecord, Profile, Settings } from '@/store'
 import { BE_CODES, getRulesForYA } from '@/lib/lhdn-rules'
 
 interface ReliefTotals {
@@ -43,7 +43,7 @@ function retainUntilDate(taxYear: number): string {
 }
 
 export async function generateAuditExcel(
-  records: Record[],
+  records: ReliefRecord[],
   profile: Profile,
   settings: Settings,
   reliefTotals: ReliefTotals,
@@ -91,7 +91,7 @@ export async function generateAuditExcel(
 
   // ── Sheet 2: Relief Breakdown ────────────────────────────────────────────
   const reliefHeader = ['#', 'BE Code', 'Category', 'Claimed (RM)', 'Cap (RM)', 'Utilised %', 'Records', 'Evidence Complete?']
-  const reliefRows = [reliefHeader]
+  const reliefRows: (string | number)[][] = [reliefHeader]
   let rowNum = 0
   let claimedTotal = 0
   let capTotal = 0
@@ -135,7 +135,7 @@ export async function generateAuditExcel(
 
   // ── Sheet 3: Full Record List ────────────────────────────────────────────
   const recordHeader = ['#', 'Date', 'Merchant', 'Description', 'Category', 'Sub-category', 'Recipient', 'Amount (RM)', 'LHDN Code', 'Receipt File', 'Audit Status']
-  const recordRows = [recordHeader]
+  const recordRows: (string | number)[][] = [recordHeader]
 
   yearRecords
     .sort((a, b) => a.date.localeCompare(b.date))

@@ -126,7 +126,7 @@ import InstallPWA from "@/components/InstallPWA"
 import { parseEWalletCSV, type EWalletProvider, type ParsedTransaction } from "@/lib/ewallet-parser"
 import StatementImport from "@/components/StatementImport"
 import type { DbRecord } from "@/lib/supabase"
-import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, computeTax, calculateTax, calculateNetTaxBalance, floorRM, type Record as ReliefRecord } from "@/store"
+import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, computeTax, calculateTax, calculateNetTaxBalance, floorRM, type ReliefRecord } from "@/store"
 import { createSupabaseBrowserClient } from "@/utils/supabase/client"
 import { performOCR, type OcrResult } from "@/lib/ocr"
 import { verifyRecord, verifyEAForm, findDuplicates, type VerifyResult, type EAFormVerifyResult } from "@/lib/verify"
@@ -589,6 +589,16 @@ export default function ReliefTrackApp() {
   // i18n translation helper
   const t = useT(settings.language ?? 'en')
 
+  // Responsive layout state — lifted to the parent so every tab (Dashboard,
+  // Profile, Settings) can read a single consistent value. `showFullDashboard`
+  // is the mobile "View full dashboard" toggle.
+  const device = useDeviceType()
+  const isMobile = device === 'mobile'
+  const isTablet = device === 'tablet'
+  const [showFullDashboard, setShowFullDashboard] = useState(false)
+  // Low-priority widgets show on tablet/desktop, or when a mobile user opts in.
+  const showAllWidgets = !isMobile || showFullDashboard
+
   // Get EA Form data for the CURRENT selected YA
   const getCurrentYearEAForm = () => {
     const year = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
@@ -1036,6 +1046,7 @@ useEffect(() => {
     employeeName: string; icNumber: string; employerName: string
     taxYear: number; grossIncome: number; epfContribution: number
     socsoContribution: number; pcbPaid: number
+    kwspMemberId?: string; lhdnTin?: string; eaFormNumber?: string; uploadDate?: string
   } | null>(null)
   const [isProcessingEAForm, setIsProcessingEAForm] = useState(false)
   const [eaFormVerifyResult, setEaFormVerifyResult] = useState<EAFormVerifyResult | null>(null)
@@ -1193,7 +1204,7 @@ useEffect(() => {
     const matchYear = recordYear === selectedYear
     const matchSearch =
       r.merchant.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      r.description.toLowerCase().includes(searchQuery.toLowerCase())
+      (r.description ?? '').toLowerCase().includes(searchQuery.toLowerCase())
     const matchCat = filterCategory === "all" || r.category === filterCategory
     return matchYear && matchSearch && matchCat
   })
@@ -1265,8 +1276,8 @@ useEffect(() => {
         rawText: result.raw_text,
         category: result.category || 'lifestyle',
       }
-      // High-confidence auto-save: skip review screen if ≥85% and data is complete
-      if (result.confidence >= 85 && reviewPayload.vendor && reviewPayload.amount) {
+      // High-confidence auto-save: skip review screen if ≥0.85 (0–1 scale) and data is complete
+      if (result.confidence >= 0.85 && reviewPayload.vendor && reviewPayload.amount) {
         addRecord({
           category: reviewPayload.category,
           date: reviewPayload.date,
@@ -1336,6 +1347,19 @@ useEffect(() => {
       // Reset file input so same file can be re-uploaded
       if (eaFormFileRef.current) eaFormFileRef.current.value = ''
     }
+  }
+
+  // Route profile updates: demo store (non-persisted) vs real store.
+  // Lifted to the parent so both ProfileTab and confirmEAFormData can call it.
+  const handleProfileUpdate = (updates: Record<string, unknown>) => {
+    if (isDemoMode) {
+      const current = useDemoStore.getState().demoProfile
+      useDemoStore.setState({ demoProfile: { ...current, ...updates } })
+    } else {
+      updateProfile(updates as any)
+    }
+    setProfileSavedMsg('Saved')
+    setTimeout(() => setProfileSavedMsg(''), 2000)
   }
 
   const confirmEAFormData = () => {
@@ -1767,7 +1791,6 @@ useEffect(() => {
           access_type: "offline",
           scope: "email https://www.googleapis.com/auth/drive.file",
         },
-        skipScreenReady: true,
       },
     })
     if (error) toast.error("Google sign-in failed", { description: error.message })
@@ -1930,12 +1953,6 @@ useEffect(() => {
   // ═══════════════════════════════════════════════════════════════════════
   const DashboardTab = () => {
     const deadline = getDeadlineInfo()
-    const device = useDeviceType()
-    const isMobile = device === 'mobile'
-    const isTablet = device === 'tablet'
-    const [showFullDashboard, setShowFullDashboard] = useState(false)
-    // Show low-priority widgets on tablet/desktop or when mobile user taps "View full"
-    const showAllWidgets = !isMobile || showFullDashboard
 
     return (
       <ScrollArea className="flex-1 min-h-0">
@@ -2808,11 +2825,11 @@ useEffect(() => {
                       {/* Description + Merchant stacked vertically */}
                       <div className="flex-1 min-w-0 overflow-hidden">
                         {/* Description — rolling if long */}
-                        <div className={cn("overflow-hidden", record.description?.length > 30 && "marquee-wrapper")}>
+                        <div className={cn("overflow-hidden", (record.description?.length ?? 0) > 30 && "marquee-wrapper")}>
                           <p
                             className={cn(
                               "text-sm font-medium",
-                              record.description?.length > 30
+                              (record.description?.length ?? 0) > 30
                                 ? "marquee-text whitespace-nowrap"
                                 : "truncate whitespace-nowrap"
                             )}
@@ -3088,18 +3105,6 @@ useEffect(() => {
   // PROFILE TAB
   // ═══════════════════════════════════════════════════════════════════════
   const ProfileTab = () => {
-    // Route profile updates: demo store (non-persisted) vs real store
-    const handleProfileUpdate = (updates: Record<string, unknown>) => {
-      if (isDemoMode) {
-        const current = useDemoStore.getState().demoProfile
-        useDemoStore.setState({ demoProfile: { ...current, ...updates } })
-      } else {
-        updateProfile(updates as any)
-      }
-      setProfileSavedMsg('Saved')
-      setTimeout(() => setProfileSavedMsg(''), 2000)
-    }
-
     // EA Form data for this YA
     const currentEA = getCurrentYearEAForm()
     const previousEA = getPreviousYearEAForm()
@@ -4194,7 +4199,7 @@ useEffect(() => {
                   date: result.date || `${settings.defaultTaxYear}-${new Date().toISOString().slice(5, 10)}`,
                   description: '',
                   invoiceNumber: result.invoiceNumber || '',
-                  confidence: result.uuid ? 100 : 50,
+                  confidence: result.uuid ? 1 : 0.5,
                   rawText: result.rawUrl,
                   category: 'lifestyle',
                 })
@@ -4595,7 +4600,7 @@ useEffect(() => {
               <Progress value={ocrProgress} className="mx-8 h-2" />
               {ocrResult && (
                 <p className="mx-4 text-sm text-muted-foreground">
-                  Confidence: {Math.round(ocrResult.confidence)}% —{" "}
+                  Confidence: {Math.round(ocrResult.confidence * 100)}% —{" "}
                   {ocrResult.raw_text.slice(0, 60)}...
                 </p>
               )}
@@ -5066,36 +5071,6 @@ useEffect(() => {
                 </div>
               )
             )}
-            {/* Detected amounts — tappable list */}
-            {eaFormData && eaFormData._debugAmounts && eaFormData._debugAmounts.length > 0 && (
-              <div className="space-y-1">
-                <Label className="text-sm font-medium">Select Annual Gross Income</Label>
-                <p className="text-xs text-muted-foreground">Tap the correct amount</p>
-                <div className="mt-2 space-y-1">
-                  {eaFormData._debugAmounts.slice(0, 8).map((a: { amount: number; raw: string }, i: number) => (
-                    <button
-                      key={i}
-                      type="button"
-                      onClick={() => {
-                        if (eaFormData) {
-                          setEaFormData({ ...eaFormData, grossIncome: a.amount })
-                        }
-                      }}
-                      className={cn(
-                        "w-full flex items-center justify-between rounded-lg border px-3 py-3 text-sm transition-all active:scale-95",
-                        a.amount === eaFormData?.grossIncome
-                          ? "border-emerald-500 bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300 font-semibold"
-                          : "border-gray-200 hover:border-emerald-300 hover:bg-emerald-50/50 dark:border-gray-700 dark:hover:bg-emerald-950/20"
-                      )}
-                    >
-                      <span className="font-mono text-xs text-muted-foreground">{a.raw}</span>
-                      <span className="font-medium">RM {a.amount.toLocaleString()}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
             {/* Detected details */}
             {eaFormData && (
               <div className="rounded-lg bg-muted/50 p-3 space-y-2 text-sm">
@@ -5291,8 +5266,8 @@ useEffect(() => {
           hasParents: !!displayProfile.hasParents,
           isFirstHomeOwner: !!displayProfile.isFirstHomeOwner,
           recordCount: displayRecords.filter(r => r.date.startsWith(settings.defaultTaxYear)).length,
-          pcbPaid: displayProfile.pcbPaid || 0,
-          chargeableIncome: Math.max(0, (displayProfile.grossIncome || 0) - (displayProfile.epfContribution || 0) - totalClaimed),
+          pcbPaid: getCurrentYearEAForm()?.pcb || 0,
+          chargeableIncome: Math.max(0, (displayProfile.grossIncome || 0) - (getCurrentYearEAForm()?.epf || 0) - totalClaimed),
           isDemo: isDemoMode,
           demoSessionId,
         }}

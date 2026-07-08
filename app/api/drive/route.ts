@@ -345,6 +345,7 @@ export async function POST(request: NextRequest) {
 
     if (action === 'saveRecord' && record) {
       affectedCategory = record.category
+      if (!affectedCategory) return NextResponse.json({ error: 'Missing record category' }, { status: 400 })
       affectedFileId = manifestFileIds[affectedCategory]
       if (!affectedFileId) return NextResponse.json({ error: `No manifest for category ${affectedCategory}` }, { status: 400 })
 
@@ -359,6 +360,7 @@ export async function POST(request: NextRequest) {
       // success: saveRecord
     } else if (action === 'updateRecord' && record) {
       affectedCategory = record.category
+      if (!affectedCategory) return NextResponse.json({ error: 'Missing record category' }, { status: 400 })
       affectedFileId = manifestFileIds[affectedCategory]
       if (!affectedFileId) return NextResponse.json({ error: `No manifest for category ${affectedCategory}` }, { status: 400 })
 

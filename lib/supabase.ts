@@ -50,15 +50,6 @@ export const supabase = supabaseUrl && supabaseAnonKey
         persistSession: true,
         // Storage key prefix to avoid conflicts
         storageKey: 'reliefttrack-auth',
-        // Cookie options (for server-side session sync)
-        cookieOptions: {
-          name: 'reliefttrack-auth-token',
-          lifetime: 60 * 60 * 8, // 8 hours
-          domain: undefined,
-          path: '/',
-          sameSite: 'lax',
-          secure: process.env.NODE_ENV === 'production',
-        },
       },
     })
   : null

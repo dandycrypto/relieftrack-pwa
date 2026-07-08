@@ -81,10 +81,6 @@ async def ocr_endpoint(file: UploadFile = File(...)):
                 text = pdf_result["raw_text"]
                 lines = pdf_result["lines"]
                 extraction_method = "pdfplumber"
-                image_height = max(
-                    (l["bbox"][3] for l in lines if l.get("bbox") and len(l["bbox"][0]) > 1),
-                    default=1000
-                )
             else:  # "ocr" — need to run OCR on rendered image
                 img = pdf_result["image"]
                 pp, _ = preprocess_image(img)
@@ -93,7 +89,6 @@ async def ocr_endpoint(file: UploadFile = File(...)):
                 lines = ocr_result["lines"]
                 tag_zones(lines, pp.shape[0])
                 extraction_method = "paddleocr_rule"
-                image_height = pp.shape[0]
         else:
             # ── Step 2: Image preprocessing
             img = load_image_bytes(content)
@@ -104,7 +99,6 @@ async def ocr_endpoint(file: UploadFile = File(...)):
             lines = ocr_result["lines"]
             tag_zones(lines, pp.shape[0])
             extraction_method = "paddleocr_rule"
-            image_height = pp.shape[0]
 
         if not text.strip():
             raise HTTPException(400, "No text extracted")

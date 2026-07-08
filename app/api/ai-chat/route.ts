@@ -21,7 +21,7 @@ const DEMO_ALLOWED_PROMPTS = [
 
 const DEMO_MAX_MESSAGES = 5
 
-function isDemoUser(context: Record<string, unknown>): boolean {
+function isDemoUser(context: TaxContext): boolean {
   // isDemo flag comes from the client (useDemoStore.isDemoMode)
   return context?.isDemo === true
 }
@@ -79,6 +79,7 @@ interface TaxContext {
   chargeableIncome?: number
   isDemo?: boolean
   demoSessionId?: string
+  demoRemaining?: number
 }
 
 // ─── System Prompt Builder ────────────────────────────────────────────────────
@@ -211,7 +212,7 @@ export async function POST(req: NextRequest) {
   const { messages, context, parseMode } = body
 
   // ── Demo Guard ───────────────────────────────────────────────────────────
-  if (isDemoUser(context as Record<string, unknown>)) {
+  if (isDemoUser(context)) {
     const sessionId = context.demoSessionId ?? 'demo-default'
     const lastUserMsg = messages?.[messages.length - 1]?.content ?? ''
 
@@ -243,7 +244,7 @@ export async function POST(req: NextRequest) {
 
     // Attach remaining count for the UI
     const remaining = getDemoRemaining(sessionId)
-    ;(context as Record<string, unknown>).demoRemaining = remaining
+    context.demoRemaining = remaining
   }
 
   // ── Parse mode: natural-language → structured record ─────────────────────

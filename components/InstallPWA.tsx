@@ -75,11 +75,10 @@ export default function InstallPWA() {
 
   const handleInstall = async () => {
     if (!deferredPrompt) return
-    deferredPrompt.preventDefault()
-    const result = await (
-      deferredPrompt as BeforeInstallPromptEvent
-    ).prompt()
-    if (result.outcome === 'accepted') {
+    const promptEvent = deferredPrompt as BeforeInstallPromptEvent
+    await promptEvent.prompt()
+    const { outcome } = await promptEvent.userChoice
+    if (outcome === 'accepted') {
       setShowBanner(false)
       setDeferredPrompt(null)
     }
@@ -150,7 +149,5 @@ interface BeforeInstallPromptEvent extends Event {
     outcome: 'accepted' | 'dismissed'
     platform: string
   }>
-  prompt(): Promise<{
-    userChoice: { outcome: 'accepted' | 'dismissed'; platform: string }
-  }>
+  prompt(): Promise<void>
 }

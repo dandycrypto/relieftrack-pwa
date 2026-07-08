@@ -284,7 +284,6 @@ export default function LandingPageClient() {
       options: {
         redirectTo: `${window.location.origin}/auth/callback`,
         queryParams: { prompt: "consent", access_type: "offline" },
-        skipScreenReady: true,
       },
     })
     if (error) {

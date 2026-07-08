@@ -38,13 +38,13 @@ export interface ReliefCategory {
 
 export { floorRM }
 
-export interface Record {
+export interface ReliefRecord {
   id: string
   category: string
   date: string
   amount: number
   merchant: string
-  description: string
+  description?: string
   status: 'verified' | 'pending'
   receiptUrl?: string // base64 data URL or blob URL or Google Drive link
   receiptFileName?: string
@@ -209,7 +209,7 @@ export function computeTax(chargeableIncome: number): number {
 }
 
 export function calculateTax(chargeableIncome: number) {
-  if (chargeableIncome <= 0) return { taxBeforeRebate: 0, taxAfterRebate: 0, effectiveRate: 0 }
+  if (chargeableIncome <= 0) return { taxBeforeRebate: 0, taxAfterRebate: 0, rebate: 0, effectiveRate: 0 }
   let tax = 0
   let remaining = chargeableIncome
   let prevMax = 0
@@ -226,6 +226,7 @@ export function calculateTax(chargeableIncome: number) {
   return {
     taxBeforeRebate: Math.floor(tax),
     taxAfterRebate: Math.floor(taxAfterRebate),
+    rebate: Math.min(rebate, Math.floor(tax)),
     effectiveRate: chargeableIncome > 0 ? (taxAfterRebate / chargeableIncome * 100) : 0,
   }
 }
@@ -264,7 +265,7 @@ export const DEMO_PROFILE: Profile = {
 }
 
 // DEMO_RECORDS — only loaded when ?demo=true, never for real new users
-export const DEMO_RECORDS: Record[] = [
+export const DEMO_RECORDS: ReliefRecord[] = [
   { id: 'seed-1', category: 'lifestyle', date: '2025-03-15', amount: 2499, merchant: 'Harvey Norman', description: 'MacBook Air M3', status: 'verified', syncedToDrive: true },
   { id: 'seed-2', category: 'medical_self', date: '2025-02-28', amount: 850, merchant: 'Pantai Hospital', description: 'Medical checkup', status: 'verified', syncedToDrive: true },
   { id: 'seed-3', category: 'epf_insurance', date: '2025-01-31', amount: 4200, merchant: 'EPF Contribution', description: 'Annual EPF statement', status: 'verified', syncedToDrive: true },
@@ -316,7 +317,7 @@ export const INITIAL_SETTINGS: Settings = {
 // ─── Demo Store (NOT persisted — demo records never touch localStorage) ─────
 
 export interface DemoStore {
-  demoRecords: Record[]
+  demoRecords: ReliefRecord[]
   demoProfile: Profile
   isDemoMode: boolean
   driveConnected: boolean
@@ -342,7 +343,7 @@ export const useDemoStore = create<DemoStore>((set) => ({
 
 interface ReliefStore {
   // State
-  records: Record[]
+  records: ReliefRecord[]
   profile: Profile
   settings: Settings
   recurringTemplates: RecurringTemplate[]
@@ -351,8 +352,8 @@ interface ReliefStore {
   isHydrated: boolean
 
   // Record Actions — id is optional; caller can pre-generate for sync purposes
-  addRecord: (record: Omit<Record, 'id'> & { id?: string }) => string
-  updateRecord: (id: string, updates: Partial<Record>) => void
+  addRecord: (record: Omit<ReliefRecord, 'id'> & { id?: string }) => string
+  updateRecord: (id: string, updates: Partial<ReliefRecord>) => void
   deleteRecord: (id: string) => void
   deleteAllRecords: () => void
 
@@ -383,6 +384,7 @@ interface ReliefStore {
   getReliefTotals: () => Record<string, number>
   getApplicableReliefs: () => ReliefCategory[]
   getTotalClaimed: () => number
+  getTotalClaimedExcludingEpfSocso: () => number
   getTotalPossible: () => number
   getEstimatedTaxSavings: () => number
 
@@ -678,9 +680,6 @@ export const useReliefStore = create<ReliefStore>()(
           // Use the full state object to call setHydrated
           state?.setHydrated(true)
         }
-      },
-      onHydrate: () => {
-        // No-op: onRehydrateStorage handles all hydration completion
       },
       partialize: (state) => ({
         records: state.records,

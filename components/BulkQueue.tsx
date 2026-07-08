@@ -335,7 +335,7 @@ export function BulkQueue({ files, onDone, onCancel, onSave, recallCategory }: P
                   <Label className="text-xs text-muted-foreground">Category</Label>
                   {editData.confidence > 0 && (
                     <Badge variant="outline" className="text-xs h-4 px-1.5">
-                      {Math.round(editData.confidence)}% conf.
+                      {Math.round(editData.confidence * 100)}% conf.
                     </Badge>
                   )}
                 </div>

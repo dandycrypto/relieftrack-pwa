@@ -5,14 +5,14 @@
  */
 
 import type { OcrResult } from '@/types/ocr'
-import type { Record } from '@/store'
+import type { ReliefRecord } from '@/store'
 
 // ─── Duplicate Detection ──────────────────────────────────────────────────────
 
 export function findDuplicates(
   newRecord: { merchant: string; amount: number; date: string },
-  existing: Record[]
-): Record[] {
+  existing: ReliefRecord[]
+): ReliefRecord[] {
   const merchantKey = newRecord.merchant.toLowerCase().trim()
   const month = newRecord.date.slice(0, 7) // YYYY-MM
   const lo = newRecord.amount * 0.9

@@ -4,7 +4,7 @@
  * Creates session + Drive folders (server-side) → redirects to app.
  */
 
-import { createServerClient } from '@supabase/ssr'
+import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -106,19 +106,29 @@ export async function GET(request: NextRequest) {
 
   if (!code) return NextResponse.redirect(`${siteUrl}/login?error=no_code`)
 
+  // Collect cookie mutations here; the auth session's cookies must reach the
+  // browser via the response we eventually return, not the request object
+  // (mutating request.cookies has no effect on the client). Applied once the
+  // final redirect target — and thus the response object — is known below.
+  const cookiesToSet: { name: string; value: string; options: CookieOptions }[] = []
+
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
         get: (name: string) => request.cookies.get(name)?.value,
-        set: (name: string, value: string, options: any) => { request.cookies.set({ name, value, ...options }) },
-        remove: (name: string, options: any) => { request.cookies.set({ name, value: '', ...options }) },
+        set: (name: string, value: string, options: CookieOptions) => {
+          cookiesToSet.push({ name, value, options })
+        },
+        remove: (name: string, options: CookieOptions) => {
+          cookiesToSet.push({ name, value: '', options })
+        },
       },
     }
   )
 
-  const { data, error } = await supabase.auth.exchangeCodeForSession(code)
+  const { error } = await supabase.auth.exchangeCodeForSession(code)
   if (error) return NextResponse.redirect(`${siteUrl}/login?error=auth_failed`)
 
   // Determine redirect based on whether this is a Drive connect OAuth
@@ -141,5 +151,9 @@ export async function GET(request: NextRequest) {
   }
 
   const separator = redirectPath.includes('?') ? '&' : '?'
-  return NextResponse.redirect(`${siteUrl}${redirectPath}${separator}drive_setup=${setupResult}`)
+  const response = NextResponse.redirect(`${siteUrl}${redirectPath}${separator}drive_setup=${setupResult}`)
+  for (const { name, value, options } of cookiesToSet) {
+    response.cookies.set({ name, value, ...options })
+  }
+  return response
 }

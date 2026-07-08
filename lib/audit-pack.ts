@@ -15,10 +15,10 @@
  * + the Excel + PDF and prompt downloads, bundled in sequence.
  */
 
-import type { Record, Profile, Settings } from '@/store'
+import type { ReliefRecord, Profile, Settings } from '@/store'
 
 interface AuditPackOptions {
-  records: Record[]
+  records: ReliefRecord[]
   profile: Profile
   settings: Settings
   reliefTotals: Record<string, number>
@@ -38,7 +38,7 @@ interface AuditPackOptions {
 
 import { BE_CODES } from '@/lib/lhdn-rules'
 
-function lhdnFileName(r: Record): string {
+function lhdnFileName(r: ReliefRecord): string {
   const date = r.date.slice(0, 10)
   const merchant = (r.merchant || 'Receipt').replace(/[^a-zA-Z0-9]/g, '').slice(0, 20)
   const code = BE_CODES[r.category] ?? 'D0'
@@ -48,7 +48,7 @@ function lhdnFileName(r: Record): string {
   return parts.join('_')
 }
 
-export function generateManifestCSV(records: Record[], taxYear: number): string {
+export function generateManifestCSV(records: ReliefRecord[], taxYear: number): string {
   const yearRecords = records.filter((r) => r.date.startsWith(String(taxYear)))
   const header = ['#', 'Date', 'Merchant', 'Category', 'LHDN Code', 'Amount (RM)', 'Recipient', 'Receipt Filename', 'Drive Synced', 'Audit Status']
   const rows = yearRecords.map((r, i) => {
