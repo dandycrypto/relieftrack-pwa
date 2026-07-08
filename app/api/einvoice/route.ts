@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from "next/server"
+import { isRateLimited, getClientIp } from "@/lib/rate-limit"
 
 // LHDN MyInvois public portal base URL for fetching e-Invoice data
 const MYINVOIS_BASE = "https://myinvois.hasil.gov.my"
+
+// No user data involved (this proxies LHDN's own public lookup), so no auth
+// is required — but still rate-limit by IP so this server can't be used as
+// an unthrottled free proxy to LHDN.
+const RATE_LIMIT_MAX = 20
+const RATE_LIMIT_WINDOW_MS = 60_000
 
 interface EInvoiceResult {
   vendor: string
@@ -13,6 +20,10 @@ interface EInvoiceResult {
 }
 
 export async function GET(req: NextRequest) {
+  if (isRateLimited(`einvoice:${getClientIp(req)}`, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS)) {
+    return NextResponse.json({ error: "Too many requests. Please slow down." }, { status: 429 })
+  }
+
   const uuid = req.nextUrl.searchParams.get("uuid")
   if (!uuid || uuid.length < 8) {
     return NextResponse.json({ error: "Missing or invalid uuid" }, { status: 400 })

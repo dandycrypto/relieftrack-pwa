@@ -1,7 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { requireAuth } from '@/lib/api-auth'
+import { isRateLimited, getClientIp } from '@/lib/rate-limit'
 
 export const runtime = 'nodejs'
 export const maxDuration = 30
+
+// Authenticated users: generous but bounded (this calls a paid LLM API).
+const AUTH_RATE_LIMIT_MAX = 30
+const AUTH_RATE_LIMIT_WINDOW_MS = 60_000
+// Demo mode has no account to key on; demoSessionId is client-supplied and
+// trivially rotated, so also bound by IP as a backstop (in addition to the
+// existing per-session prompt allowlist + 5-message cap below).
+const DEMO_IP_RATE_LIMIT_MAX = 15
+const DEMO_IP_RATE_LIMIT_WINDOW_MS = 60_000
 
 // ─── Demo Account Guard ──────────────────────────────────────────────────────
 // Demo mode: restrict to 5 hardcoded prompts + 5 messages per session.
@@ -211,8 +222,30 @@ export async function POST(req: NextRequest) {
 
   const { messages, context, parseMode } = body
 
+  // ── Auth gate ─────────────────────────────────────────────────────────────
+  // Demo mode (the "Ask AI" widget only) is allowed without a real account,
+  // but is bounded below by a prompt allowlist + message cap + IP limit.
+  // Everything else (including parseMode, which is only reachable from the
+  // authenticated "Add Record" flow) requires a real Supabase session — this
+  // is a paid LLM API call and must not be open to anonymous callers.
+  const demoRequested = isDemoUser(context)
+  if (!demoRequested) {
+    const user = await requireAuth(req)
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+    if (isRateLimited(`ai-chat:${user.id}`, AUTH_RATE_LIMIT_MAX, AUTH_RATE_LIMIT_WINDOW_MS)) {
+      return NextResponse.json({ error: 'Too many requests. Please slow down.' }, { status: 429 })
+    }
+  }
+
   // ── Demo Guard ───────────────────────────────────────────────────────────
-  if (isDemoUser(context)) {
+  if (demoRequested) {
+    const clientIp = getClientIp(req)
+    if (isRateLimited(`ai-chat-demo-ip:${clientIp}`, DEMO_IP_RATE_LIMIT_MAX, DEMO_IP_RATE_LIMIT_WINDOW_MS)) {
+      return NextResponse.json({ error: 'Too many requests. Please slow down.' }, { status: 429 })
+    }
+
     const sessionId = context.demoSessionId ?? 'demo-default'
     const lastUserMsg = messages?.[messages.length - 1]?.content ?? ''
 

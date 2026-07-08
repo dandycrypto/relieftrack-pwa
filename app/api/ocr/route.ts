@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { spawn } from 'child_process'
+import { requireAuth } from '@/lib/api-auth'
+import { isRateLimited } from '@/lib/rate-limit'
 import {
   parseDate,
   extractAmount,
@@ -13,6 +15,10 @@ import {
   EA_FORM_NUMBER_PATTERNS,
   extractFirstMatch,
 } from '@/lib/ocr-parsers'
+
+// OCR is compute-heavy (RapidOCR / pdftotext); cap requests per user.
+const RATE_LIMIT_MAX = 20
+const RATE_LIMIT_WINDOW_MS = 60_000
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -156,7 +162,7 @@ function isEAForm(rawText: string): { detected: boolean; score: number; matched:
   return { detected: score >= 2, score, matched }
 }
 
-// Format name: "DANDYLAUJINGHUI" → "DANDY LAU JING HUI"
+// Format name: "TANWEIMING" → "TAN WEI MING"
 function formatEAFormName(name: string): string {
   // Mixed-case names (e.g., "DandyLauJingHui")
   const mixed = name
@@ -164,7 +170,7 @@ function formatEAFormName(name: string): string {
     .replace(/([a-z])([A-Z])/g, '$1 $2')
   if (mixed.includes(' ')) return mixed
 
-  // ALL CAPS names (e.g., "DANDYLAUJINGHUI")
+  // ALL CAPS names (e.g., "TANWEIMING")
   if (name === name.toUpperCase() && !name.includes(' ')) {
     // Strategy: find known Chinese name components, split around them
     // Common Chinese name parts: LAU, JING, HUI, WONG, TAN, LIM, etc.
@@ -238,7 +244,7 @@ function parseEAFormFromPDF(rawText: string): EAFormData | null {
 
   // ── Employee Name ──
   // pdftotext layout: the name appears after "1." and before "Nama Penuh Pekerja"
-  // e.g. "1.   DANDY LAU JING HUI   Nama Penuh Pekerja / Pesara ..."
+  // e.g. "1.   TAN WEI MING   Nama Penuh Pekerja / Pesara ..."
   // Strategy: find line that starts (after whitespace) with a number and then a name
   // The name is on a line that contains "Nama Penuh Pekerja" on the same line but the name comes BEFORE that label
   const nameMatch = rawText.match(/1\.\s+([A-Z][A-Z\s]{2,50}?)\s+Nama\s+Penuh\s+Pekerja/i)
@@ -253,7 +259,7 @@ function parseEAFormFromPDF(rawText: string): EAFormData | null {
   }
 
   // ── IC Number ──
-  // "No. K.P. Baru  910828-12-7099"
+  // "No. K.P. Baru  880101-14-5566"
   const icMatch = rawText.match(/\b([0-9]{6}[-\s]?[0-9]{2}[-\s]?[0-9]{4})\b/)
   if (icMatch) {
     result.icNumber = icMatch[1].replace(/\s+/g, '').replace(/-/g, '').replace(/(\d{6})(\d{2})(\d{4})/, '$1-$2-$3')
@@ -314,7 +320,7 @@ function parseEAFormFromPDF(rawText: string): EAFormData | null {
   if (eaNum) result.eaFormNumber = eaNum
 
   // ── Employer Name ──
-  // "Nama dan Alamat Majikan  NIPPON KOEI MOBILITY SDN BHD"
+  // "Nama dan Alamat Majikan  ACME MANUFACTURING SDN BHD"
   // The employer name appears on the line(s) following "Nama dan Alamat Majikan"
   const majikanIdx = rawText.search(/Nama\s+dan\s+Alamat\s+Majikan/i)
   if (majikanIdx >= 0) {
@@ -363,7 +369,7 @@ function parseEAForm(rawText: string): EAFormData | null {
   }
 
   // ── Employee Name ──
-  // "BUTIRANPEKERJA\nDANDYLAUJINGHUI" — name on line after BUTIRANPEKERJA
+  // "BUTIRANPEKERJA\nTANWEIMING" — name on line after BUTIRANPEKERJA
   // Stop at newline or non-name chars (NamaPenuhPekerja label)
   const nameMatch = rawText.match(/BUTIRANPEKERJA\s*\n\s*([A-Z][A-Za-z\s]{3,60})/i)
   if (nameMatch) {
@@ -464,6 +470,14 @@ function parseEAForm(rawText: string): EAFormData | null {
 
 export async function POST(request: NextRequest) {
   try {
+    const user = await requireAuth(request)
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+    if (isRateLimited(`ocr:${user.id}`, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS)) {
+      return NextResponse.json({ error: 'Too many requests. Please slow down.' }, { status: 429 })
+    }
+
     const formData = await request.formData()
     const file = formData.get('file') as File | null
 

@@ -125,7 +125,7 @@ export const TAX_RELIEFS: Record<number, TaxReliefItem[]> = {
   // ── Year of Assessment 2025 ──────────────────────────────────────────────
   2025: [
     { category: 'individual', item: 'Individual & Dependent Relatives', maxAmount: 9000, notes: 'Automatic for all taxpayers' },
-    { category: 'medical_self', item: 'Medical (Self, Spouse, Children)', maxAmount: 10000, notes: 'Serious diseases, fertility, dental, vaccination, mental health, complete health检查' },
+    { category: 'medical_self', item: 'Medical (Self, Spouse, Children)', maxAmount: 10000, notes: 'Serious diseases, fertility, dental, vaccination, mental health, complete health checkup' },
     { category: 'parents_medical', item: 'Parents Medical & Carer', maxAmount: 8000, notes: 'Medical expenses for parents (father/mother/grandparents)' },
     { category: 'disabled', item: 'Disabled Individual', maxAmount: 7000, notes: 'Disabled person self/spouse/child' },
     { category: 'disabled_equipment', item: 'Disabled Equipment', maxAmount: 6000, notes: 'Supporting equipment for disabled person' },

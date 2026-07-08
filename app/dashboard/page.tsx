@@ -1199,6 +1199,10 @@ useEffect(() => {
 
   // Filtered records (uses displayRecords — either demo or real)
   const selectedYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+  // Year-scoped but otherwise unfiltered (no search/category filter) — for
+  // subcategory breakdown displays that need every record in the selected
+  // YA, not just what's currently visible in the Records tab's search box.
+  const yearScopedRecords = displayRecords.filter((r) => new Date(r.date).getFullYear() === selectedYear)
   const filteredRecords = displayRecords.filter((r) => {
     const recordYear = new Date(r.date).getFullYear()
     const matchYear = recordYear === selectedYear
@@ -2659,11 +2663,11 @@ useEffect(() => {
                         {relief.subcategories && (
                           <div className="space-y-2">
                             {relief.subcategories.map((sub) => {
-                              let subClaimed = floorRM(getSubCategoryTotal(displayRecords, relief.id, sub.id))
+                              let subClaimed = floorRM(getSubCategoryTotal(yearScopedRecords, relief.id, sub.id))
                               const currentEA = getCurrentYearEAForm()
                               if (relief.id === 'epf_insurance' && currentEA?.confirmed) {
-                                if (sub.id === 'epf_mandatory') subClaimed += floorRM(Math.min(currentEA.epf || 0, 4000))
-                                if (sub.id === 'epf_socso') subClaimed += floorRM(Math.min(currentEA.socso || 0, 350))
+                                if (sub.id === 'epf_mandatory') subClaimed += floorRM(Math.min(currentEA.epf || 0, sub.maxLimit))
+                                if (sub.id === 'epf_socso') subClaimed += floorRM(Math.min(currentEA.socso || 0, sub.maxLimit))
                               }
                               const effectiveMax = sub.maxLimit || maxLimit
                               const subPct = Math.min(Math.round((subClaimed / effectiveMax) * 100), 100)

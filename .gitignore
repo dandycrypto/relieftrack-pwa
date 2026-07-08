@@ -25,3 +25,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# personal tax documents (never commit real EA forms, receipts, etc.)
+/data/*.pdf

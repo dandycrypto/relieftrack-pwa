@@ -8,6 +8,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { floorRM } from '@/lib/ocr-parsers'
+import { getRuleForCategory, getSubLimitCap } from '@/lib/lhdn-rules'
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -136,42 +137,60 @@ export interface Settings {
 
 // ─── Relief Categories (LHDN YA 2025) ─────────────────────────────────────
 
+// Relief caps are sourced from lib/lhdn-rules.ts (the versioned rules
+// engine already used by the audit export, scenario planner, and relief
+// maximiser) instead of being duplicated here — this file previously kept
+// its own hardcoded copy of every cap, and it had already drifted out of
+// sync (e.g. SOCSO was 350 here vs the correct 400 in lhdn-rules.ts).
+// RELIEF_CATEGORIES itself only owns UI-display metadata (name, icon,
+// color, description, profile gating).
+const CAP_YEAR = 2025
+const cap = (categoryId: string): number => getRuleForCategory(categoryId, CAP_YEAR)?.totalCap ?? 0
+const subCap = (categoryId: string, subId: string): number => getSubLimitCap(categoryId, subId, CAP_YEAR)
+
+// epf_insurance groups three separate LHDN BE codes (D12 EPF/insurance,
+// D13 PRS, D15 SOCSO) into one UI card, so — unlike every other category —
+// its parent cap isn't a single lhdn-rules totalCap; it's the sum of the
+// five grouped sub-limits.
+const EPF_INSURANCE_SUB_IDS = ['socso', 'epf', 'life_takaful', 'prs', 'edu_medical_insurance']
+const epfInsuranceCap = EPF_INSURANCE_SUB_IDS.reduce((sum, id) => sum + subCap('epf_insurance', id), 0)
+
 export const RELIEF_CATEGORIES: ReliefCategory[] = [
-  { id: 'individual', name: 'Individual & Dependent Relatives', maxLimit: 9000, icon: 'User', description: 'Automatic relief for all taxpayers', alwaysShow: true, color: 'emerald' },
-  { id: 'medical_self', name: 'Medical (Self, Spouse, Children)', maxLimit: 10000, icon: 'Stethoscope', description: 'Serious diseases, fertility treatment, vaccination', alwaysShow: true, color: 'blue', subcategories: [
+  { id: 'individual', name: 'Individual & Dependent Relatives', maxLimit: cap('individual'), icon: 'User', description: 'Automatic relief for all taxpayers', alwaysShow: true, color: 'emerald' },
+  { id: 'medical_self', name: 'Medical (Self, Spouse, Children)', maxLimit: cap('medical_self'), icon: 'Stethoscope', description: 'Serious diseases, fertility treatment, vaccination', alwaysShow: true, color: 'blue', subcategories: [
     { id: 'medical_diseases', name: 'Serious Diseases', maxLimit: 0, description: 'Self, spouse or child' },
     { id: 'medical_fertility', name: 'Fertility Treatment', maxLimit: 0, description: 'Self or spouse' },
-    { id: 'medical_vaccination', name: 'Vaccination', maxLimit: 1000, description: 'Self, spouse or child' },
-    { id: 'medical_dental', name: 'Dental Examination', maxLimit: 1000, description: 'Self, spouse or child' },
+    { id: 'medical_vaccination', name: 'Vaccination', maxLimit: subCap('medical_self', 'vaccination'), description: 'Self, spouse or child' },
+    { id: 'medical_dental', name: 'Dental Examination', maxLimit: subCap('medical_self', 'dental'), description: 'Self, spouse or child' },
   ] },
-  { id: 'parents_medical', name: 'Parents Medical & Carer', maxLimit: 8000, icon: 'Heart', description: 'Medical expenses for parents', profileKey: 'hasParents', color: 'rose', subcategories: [
+  { id: 'parents_medical', name: 'Parents Medical & Carer', maxLimit: cap('parents_medical'), icon: 'Heart', description: 'Medical expenses for parents', profileKey: 'hasParents', color: 'rose', subcategories: [
     { id: 'parents_medical_treatment', name: 'Medical Treatment', maxLimit: 0, description: 'Medical, dental, special needs, carer (certified)' },
-    { id: 'parents_medical_checkup', name: 'Complete Medical Checkup', maxLimit: 1000 },
+    { id: 'parents_medical_checkup', name: 'Complete Medical Checkup', maxLimit: subCap('parents_medical', 'checkup') },
   ] },
-  { id: 'disabled', name: 'Disabled Individual', maxLimit: 7000, icon: 'Users', description: 'Additional relief for disabled persons', profileKey: 'isDisabled', color: 'violet' },
-  { id: 'disabled_equipment', name: 'Disabled Equipment', maxLimit: 6000, icon: 'Users', description: 'Supporting equipment for disabled', profileKey: 'isDisabled', color: 'orange' },
-  { id: 'spouse', name: 'Spouse / Alimony', maxLimit: 4000, icon: 'Heart', description: 'For non-working spouse or alimony payments', profileKey: 'hasSpouseRelief', color: 'pink' },
-  { id: 'children_under18', name: 'Children (Under 18)', maxLimit: 2000, icon: 'Users', description: 'Per child relief', profileKey: 'hasChildrenUnder18', perItem: true, color: 'cyan' },
-  { id: 'children_education', name: 'Children (Higher Education)', maxLimit: 8000, icon: 'GraduationCap', description: 'Children in tertiary education', profileKey: 'hasChildrenEducation', perItem: true, color: 'teal' },
-  { id: 'education_self', name: 'Education (Self)', maxLimit: 7000, icon: 'GraduationCap', description: 'Degree, Masters, professional courses', alwaysShow: true, color: 'amber', subcategories: [
+  { id: 'disabled', name: 'Disabled Individual', maxLimit: cap('disabled'), icon: 'Users', description: 'Additional relief for disabled persons', profileKey: 'isDisabled', color: 'violet' },
+  { id: 'disabled_equipment', name: 'Disabled Equipment', maxLimit: cap('disabled_equipment'), icon: 'Users', description: 'Supporting equipment for disabled', profileKey: 'isDisabled', color: 'orange' },
+  { id: 'spouse', name: 'Spouse / Alimony', maxLimit: cap('spouse'), icon: 'Heart', description: 'For non-working spouse or alimony payments', profileKey: 'hasSpouseRelief', color: 'pink' },
+  { id: 'children_under18', name: 'Children (Under 18)', maxLimit: cap('children_under18'), icon: 'Users', description: 'Per child relief', profileKey: 'hasChildrenUnder18', perItem: true, color: 'cyan' },
+  { id: 'children_education', name: 'Children (Higher Education)', maxLimit: cap('children_education'), icon: 'GraduationCap', description: 'Children in tertiary education', profileKey: 'hasChildrenEducation', perItem: true, color: 'teal' },
+  { id: 'education_self', name: 'Education (Self)', maxLimit: cap('education_self'), icon: 'GraduationCap', description: 'Degree, Masters, professional courses', alwaysShow: true, color: 'amber', subcategories: [
     { id: 'edu_professional', name: 'Professional Courses', maxLimit: 0, description: 'Law, accounting, technical, vocational' },
     { id: 'edu_degree', name: 'Degree (Masters/Doctorate)', maxLimit: 0 },
-    { id: 'edu_upskilling', name: 'Upskilling Courses', maxLimit: 2000 },
+    { id: 'edu_upskilling', name: 'Upskilling Courses', maxLimit: subCap('education_self', 'upskilling') },
   ] },
-  { id: 'lifestyle', name: 'Lifestyle', maxLimit: 3500, icon: 'Smartphone', description: 'Books, PC, smartphone, sports equipment, internet', alwaysShow: true, color: 'red', subcategories: [
-    { id: 'lifestyle_basic', name: 'Books, PC, Smartphone, Internet', maxLimit: 2500, description: 'Books, PC/smartphone/tablet, internet, courses' },
-    { id: 'lifestyle_sports', name: 'Sports & Gym', maxLimit: 1000, description: 'Sports equipment, facility, competition, gym' },
+  { id: 'lifestyle', name: 'Lifestyle', maxLimit: cap('lifestyle'), icon: 'Smartphone', description: 'Books, PC, smartphone, sports equipment, internet', alwaysShow: true, color: 'red', subcategories: [
+    { id: 'lifestyle_basic', name: 'Books, PC, Smartphone, Internet', maxLimit: subCap('lifestyle', 'basic'), description: 'Books, PC/smartphone/tablet, internet, courses' },
+    { id: 'lifestyle_sports', name: 'Sports & Gym', maxLimit: subCap('lifestyle', 'sports'), description: 'Sports equipment, facility, competition, gym' },
   ] },
-  { id: 'epf_insurance', name: 'EPF / Life Insurance / Takaful', maxLimit: 14350, icon: 'PiggyBank', description: 'Retirement and insurance contributions', alwaysShow: true, color: 'indigo', subcategories: [
-    { id: 'epf_socso', name: 'SOCSO Contribution', maxLimit: 350 },
-    { id: 'epf_mandatory', name: 'EPF / Mandatory Contributions', maxLimit: 4000 },
-    { id: 'epf_life', name: 'Life Insurance / Takaful', maxLimit: 3000 },
-    { id: 'epf_deferred', name: 'Deferred Annuity / PRS', maxLimit: 3000 },
-    { id: 'epf_edu_medical_insurance', name: 'Education & Medical Insurance', maxLimit: 4000 },
+  { id: 'epf_insurance', name: 'EPF / Life Insurance / Takaful', maxLimit: epfInsuranceCap, icon: 'PiggyBank', description: 'Retirement and insurance contributions', alwaysShow: true, color: 'indigo', subcategories: [
+    { id: 'epf_socso', name: 'SOCSO Contribution', maxLimit: subCap('epf_insurance', 'socso') },
+    { id: 'epf_mandatory', name: 'EPF / Mandatory Contributions', maxLimit: subCap('epf_insurance', 'epf') },
+    { id: 'epf_life', name: 'Life Insurance / Takaful', maxLimit: subCap('epf_insurance', 'life_takaful') },
+    { id: 'epf_deferred', name: 'Deferred Annuity / PRS', maxLimit: subCap('epf_insurance', 'prs') },
+    { id: 'epf_edu_medical_insurance', name: 'Education & Medical Insurance', maxLimit: subCap('epf_insurance', 'edu_medical_insurance') },
   ] },
-  { id: 'housing_loan', name: 'First Home Housing Loan Interest', maxLimit: 7000, icon: 'Building', description: 'Interest on first home loan', profileKey: 'isFirstHomeOwner', color: 'sky', subcategories: [
-    { id: 'housing_500k', name: 'House Price ≤ RM500,000', maxLimit: 7000 },
-    { id: 'housing_750k', name: 'House Price RM500,001–750,000', maxLimit: 5000 },
+  { id: 'housing_loan', name: 'First Home Housing Loan Interest', maxLimit: cap('housing_loan'), icon: 'Building', description: 'Interest on first home loan', profileKey: 'isFirstHomeOwner', color: 'sky', subcategories: [
+    { id: 'housing_500k', name: 'House Price ≤ RM500,000', maxLimit: subCap('housing_loan', 'le500k') },
+    { id: 'housing_750k', name: 'House Price RM500,001–750,000', maxLimit: subCap('housing_loan', 'le750k') },
   ] },
 ]
 
@@ -548,46 +567,73 @@ export const useReliefStore = create<ReliefStore>()(
 
       getReliefTotals: () => {
         const { records, profile, settings } = get()
+        const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
+        // Only count records dated within the selected Year of Assessment —
+        // otherwise a receipt from a different year silently inflates this
+        // YA's totals (and the claimable-amount shown to the user).
+        const yearRecords = records.filter((r) => new Date(r.date).getFullYear() === taxYear)
+
         const totals: Record<string, number> = {}
 
         RELIEF_CATEGORIES.forEach((cat) => { totals[cat.id] = 0 })
-        totals['individual'] = 9000 // Always automatic
+        totals['individual'] = cap('individual') // Always automatic
 
         // Children per-item: cap at per-person maximums
-        const childrenUnder18Records = records.filter((r) => r.category === 'children_under18')
+        const childrenUnder18Records = yearRecords.filter((r) => r.category === 'children_under18')
         if (profile.childrenUnder18 > 0) {
-          const maxTotal = profile.childrenUnder18 * 2000
+          const maxTotal = profile.childrenUnder18 * cap('children_under18')
           const claimed = childrenUnder18Records.reduce((s, r) => s + floorRM(r.amount), 0)
           // If no records, use max. If records exist, use claimed (capped at max)
           totals['children_under18'] = childrenUnder18Records.length === 0 ? maxTotal : Math.min(claimed, maxTotal)
         }
 
-        const childrenEducationRecords = records.filter((r) => r.category === 'children_education')
+        const childrenEducationRecords = yearRecords.filter((r) => r.category === 'children_education')
         if (profile.childrenEducation > 0) {
-          const maxTotal = profile.childrenEducation * 8000
+          const maxTotal = profile.childrenEducation * cap('children_education')
           const claimed = childrenEducationRecords.reduce((s, r) => s + floorRM(r.amount), 0)
           // If no records, use max. If records exist, use claimed (capped at max)
           totals['children_education'] = childrenEducationRecords.length === 0 ? maxTotal : Math.min(claimed, maxTotal)
         }
 
-        // Sum up other records
-        records.forEach((rec) => {
-          if (rec.category !== 'children_under18' && rec.category !== 'children_education') {
-            totals[rec.category] = (totals[rec.category] || 0) + floorRM(rec.amount)
+        // Sum up other records, enforcing LHDN subcategory sub-caps where
+        // defined (e.g. lifestyle sports equipment is capped at RM1,000
+        // within the wider RM3,500 lifestyle limit — previously only the
+        // parent-category cap was enforced, so a subcategory could quietly
+        // consume the entire parent limit on its own).
+        RELIEF_CATEGORIES.forEach((cat) => {
+          if (cat.id === 'individual' || cat.id === 'children_under18' || cat.id === 'children_education') return
+          const catRecords = yearRecords.filter((r) => r.category === cat.id)
+          if (!cat.subcategories || cat.subcategories.length === 0) {
+            totals[cat.id] = catRecords.reduce((s, r) => s + floorRM(r.amount), 0)
+            return
           }
+          const subIds = new Set(cat.subcategories.map((s) => s.id))
+          let sum = 0
+          for (const sub of cat.subcategories) {
+            const subClaimed = catRecords
+              .filter((r) => r.lhdNCategory === sub.id)
+              .reduce((s, r) => s + floorRM(r.amount), 0)
+            sum += sub.maxLimit > 0 ? Math.min(subClaimed, sub.maxLimit) : subClaimed
+          }
+          // Records under this category with no matching subcategory tag
+          // (added before a subcategory was chosen, or tagged by a scheme
+          // that doesn't match) still count toward the parent cap.
+          sum += catRecords
+            .filter((r) => !r.lhdNCategory || !subIds.has(r.lhdNCategory))
+            .reduce((s, r) => s + floorRM(r.amount), 0)
+          totals[cat.id] = sum
         })
 
         // Add EA Form EPF/SOCSO to epf_insurance category (auto-filled, not manual receipts)
-        const taxYear = parseInt(settings.defaultTaxYear) || new Date().getFullYear()
         const currentEA = settings.eaFormByYear?.[taxYear]
         if (currentEA?.confirmed) {
-          const eaFormEpfAmt = Math.min(currentEA.epf || 0, 4000) // capped at EPF sublimit
-          const eaFormSocsoAmt = Math.min(currentEA.socso || 0, 350) // capped at SOCSO sublimit
+          const eaFormEpfAmt = Math.min(currentEA.epf || 0, subCap('epf_insurance', 'epf'))
+          const eaFormSocsoAmt = Math.min(currentEA.socso || 0, subCap('epf_insurance', 'socso'))
           const currentEpfInsurance = totals['epf_insurance'] || 0
-          totals['epf_insurance'] = Math.min(currentEpfInsurance + eaFormEpfAmt + eaFormSocsoAmt, 14350)
+          totals['epf_insurance'] = Math.min(currentEpfInsurance + eaFormEpfAmt + eaFormSocsoAmt, epfInsuranceCap)
         }
 
-        // Cap at limits
+        // Cap at parent limits (final safety net)
         RELIEF_CATEGORIES.forEach((cat) => {
           if (!cat.perItem) {
             totals[cat.id] = Math.min(totals[cat.id] || 0, cat.maxLimit)
