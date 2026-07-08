@@ -125,8 +125,14 @@ export async function fetchRecords(userId: string) {
   return { data: data as DbRecord[] | null, error }
 }
 
-/** Insert a new record */
-export async function insertRecord(record: Omit<DbRecord, 'id' | 'created_at' | 'updated_at'>) {
+/**
+ * Insert a new record.
+ * Pass `id` explicitly (a client-generated UUID) so the remote row's id
+ * matches the local record's id — without this, Supabase mints its own
+ * uuid_generate_v4() default and the two copies can never be reconciled
+ * again (the sign-in merge matches records by id).
+ */
+export async function insertRecord(record: Omit<DbRecord, 'created_at' | 'updated_at'>) {
   if (!supabase) return { data: null, error: 'Supabase not configured' }
   const { data, error } = await supabase
     .from('records')
@@ -155,6 +161,17 @@ export async function deleteRecord(id: string) {
     .from('records')
     .update({ deleted_at: new Date().toISOString() })
     .eq('id', id)
+  return { error }
+}
+
+/** Soft-delete every record for a user (mirrors the local "delete all" action) */
+export async function deleteAllRecordsForUser(userId: string) {
+  if (!supabase) return { error: 'Supabase not configured' }
+  const { error } = await supabase
+    .from('records')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('user_id', userId)
+    .is('deleted_at', null)
   return { error }
 }
 

@@ -429,7 +429,11 @@ export const useReliefStore = create<ReliefStore>()(
       // ── Record Actions (real records only — demo records use separate store) ─
 
       addRecord: (record) => {
-        const newId = record.id || `rec-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+        // A real UUID (not e.g. `rec-<timestamp>-<random>`) so this id can be
+        // used as-is for the Supabase records.id column when synced — the
+        // sign-in merge below matches remote rows back to local records by
+        // this id, which only works if both sides agree on the same value.
+        const newId = record.id || crypto.randomUUID()
         set((state) => ({
           records: [{ ...record, id: newId, syncedToDrive: false }, ...state.records],
         }))

@@ -1576,13 +1576,16 @@ useEffect(() => {
     closeAddDrawer()
   }
 
-  // Fire-and-forget Supabase insert for a saved record
+  // Fire-and-forget Supabase insert for a saved record. Passes the local
+  // record's own id through so the remote row can be matched back to it
+  // later (updates, deletes, and the sign-in merge all key on this id).
   const syncNewRecordToSupabase = useCallback(async (id: string, record: Partial<ReliefRecord>) => {
     const userId = settings.supabaseUserId
     if (!userId || isDemoMode) return
     try {
       const { insertRecord } = await import('@/lib/supabase')
       await insertRecord({
+        id,
         user_id: userId,
         merchant: record.merchant || '',
         category: record.category || 'lifestyle',
@@ -1596,7 +1599,42 @@ useEffect(() => {
         lhdn_category: record.lhdNCategory || undefined,
         recipient: record.recipient || undefined,
         notes: record.notes || undefined,
-      } as Omit<DbRecord, 'id' | 'created_at' | 'updated_at'>)
+      } as Omit<DbRecord, 'created_at' | 'updated_at'>)
+    } catch { /* non-critical */ }
+  }, [settings.supabaseUserId, isDemoMode])
+
+  // Fire-and-forget Supabase update/delete — mirrors syncNewRecordToSupabase.
+  // Without these, edits and deletes only ever happen locally: the stale
+  // remote row survives and resurrects on the next sign-in merge.
+  const syncRecordUpdateToSupabase = useCallback(async (id: string, updates: Partial<ReliefRecord>) => {
+    const userId = settings.supabaseUserId
+    if (!userId || isDemoMode) return
+    try {
+      const { updateRecord: updateSupabaseRecord } = await import('@/lib/supabase')
+      const dbUpdates: Partial<DbRecord> = {}
+      if (updates.merchant !== undefined) dbUpdates.merchant = updates.merchant
+      if (updates.category !== undefined) dbUpdates.category = updates.category
+      if (updates.date !== undefined) dbUpdates.date = updates.date
+      if (updates.amount !== undefined) dbUpdates.amount = updates.amount
+      if (updates.status !== undefined) dbUpdates.status = updates.status
+      if (updates.description !== undefined) dbUpdates.description = updates.description
+      if (updates.receiptUrl !== undefined) dbUpdates.receipt_url = updates.receiptUrl
+      if (updates.receiptFileName !== undefined) dbUpdates.receipt_file_name = updates.receiptFileName
+      if (updates.invoiceNumber !== undefined) dbUpdates.invoice_number = updates.invoiceNumber
+      if (updates.lhdNCategory !== undefined) dbUpdates.lhdn_category = updates.lhdNCategory
+      if (updates.recipient !== undefined) dbUpdates.recipient = updates.recipient
+      if (updates.notes !== undefined) dbUpdates.notes = updates.notes
+      if (Object.keys(dbUpdates).length === 0) return
+      await updateSupabaseRecord(id, dbUpdates)
+    } catch { /* non-critical */ }
+  }, [settings.supabaseUserId, isDemoMode])
+
+  const syncRecordDeleteToSupabase = useCallback(async (id: string) => {
+    const userId = settings.supabaseUserId
+    if (!userId || isDemoMode) return
+    try {
+      const { deleteRecord: deleteSupabaseRecord } = await import('@/lib/supabase')
+      await deleteSupabaseRecord(id)
     } catch { /* non-critical */ }
   }, [settings.supabaseUserId, isDemoMode])
 
@@ -1924,6 +1962,15 @@ useEffect(() => {
     deleteAllRecords()
     setShowDeleteDialog(false)
     toast.success("All records deleted.")
+    const userId = settings.supabaseUserId
+    if (userId && !isDemoMode) {
+      (async () => {
+        try {
+          const { deleteAllRecordsForUser } = await import('@/lib/supabase')
+          await deleteAllRecordsForUser(userId)
+        } catch { /* non-critical */ }
+      })()
+    }
   }
 
   // ── Delete One ──────────────────────────────────────────────────────────
@@ -1933,11 +1980,12 @@ useEffect(() => {
   const confirmDeleteOne = () => {
     if (deleteOneId) {
       deleteRecord(deleteOneId)
+      syncToDrive('deleteRecord', undefined, deleteOneId)
+      syncRecordDeleteToSupabase(deleteOneId)
       setSelectedRecord(null)
       setEditingRecord(null)
       setDeleteOneId(null)
       toast.success("Record deleted.")
-      syncToDrive('deleteRecord', undefined, deleteOneId)
     }
   }
 
@@ -3075,6 +3123,7 @@ useEffect(() => {
           onSave={(updates) => {
             updateRecord(editingRecord.id, updates)
             syncToDrive('updateRecord', { ...editingRecord, ...updates } as ReliefRecord)
+            syncRecordUpdateToSupabase(editingRecord.id, updates)
             setEditingRecord(null)
             setSelectedRecord(null)
             toast.success("Record updated!")
