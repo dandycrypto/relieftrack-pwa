@@ -3,15 +3,15 @@
  * Cache-first strategy for static assets
  */
 
-const CACHE_NAME = 'relieftrack-v3';
+const CACHE_NAME = 'relieftrack-v4';
 const OFFLINE_URL = '/';
 
 // Assets to cache on install
 const PRECACHE_ASSETS = [
   '/',
   '/manifest.json',
-  '/icon-192.png',
-  '/icon-512.png',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png',
 ];
 
 // ─── Install ───────────────────────────────────────────────────────────────
@@ -118,8 +118,8 @@ self.addEventListener('push', (event) => {
   event.waitUntil(
     self.registration.showNotification(data.title || 'ReliefTrack MY', {
       body: data.body,
-      icon: '/icon-192.png',
-      badge: '/icon-192.png',
+      icon: '/icons/icon-192.png',
+      badge: '/icons/icon-192.png',
       tag: data.tag || 'relieftrack-notif',
       data: data.url || '/',
     })

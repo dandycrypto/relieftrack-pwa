@@ -62,7 +62,7 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" className="bg-background w-full overflow-x-hidden">
+    <html lang="en" className="bg-background w-full overflow-x-hidden" suppressHydrationWarning>
       <head>
         <meta name="theme-color" content="#059669" />
         <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=5, viewport-fit=cover" />
