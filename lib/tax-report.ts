@@ -6,7 +6,7 @@
  */
 
 import { jsPDF } from 'jspdf'
-import type { Record, Profile, Settings, ReliefCategory } from '@/store'
+import type { ReliefRecord, Profile, Settings, ReliefCategory } from '@/store'
 import { RELIEF_CATEGORIES, computeTax, calculateTax } from '@/store'
 import { formatRM } from '@/lib/export'
 
@@ -61,7 +61,7 @@ function checkPage(doc: jsPDF, y: number, margin: number): number {
 }
 
 export function generateTaxReport(
-  records: Record[],
+  records: ReliefRecord[],
   profile: Profile,
   settings: Settings,
   reliefTotals: { [catId: string]: number }

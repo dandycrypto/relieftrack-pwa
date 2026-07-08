@@ -3,7 +3,7 @@
  */
 
 import { jsPDF } from 'jspdf'
-import type { Record, Profile, ReliefCategory } from '@/store'
+import type { ReliefRecord, Profile, ReliefCategory } from '@/store'
 import { RELIEF_CATEGORIES } from '@/store'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -19,7 +19,7 @@ function categoryName(id: string, categories: ReliefCategory[]): string {
 // ─── CSV Export ─────────────────────────────────────────────────────────────
 
 export function exportRecordsCSV(
-  records: Record[],
+  records: ReliefRecord[],
   categories: ReliefCategory[]
 ): void {
   const headers = ['Date', 'Category', 'Merchant', 'Description', 'Amount (RM)', 'Status']
@@ -28,7 +28,7 @@ export function exportRecordsCSV(
     rec.date,
     categoryName(rec.category, categories),
     `"${rec.merchant.replace(/"/g, '""')}"`,
-    `"${rec.description.replace(/"/g, '""')}"`,
+    `"${(rec.description ?? '').replace(/"/g, '""')}"`,
     rec.amount.toFixed(2),
     rec.status,
   ])
@@ -40,7 +40,7 @@ export function exportRecordsCSV(
 // ─── PDF Export ─────────────────────────────────────────────────────────────
 
 export function exportRecordsPDF(
-  records: Record[],
+  records: ReliefRecord[],
   profile: Profile,
   categories: ReliefCategory[],
   totals: { [k: string]: number },
@@ -251,7 +251,7 @@ const LHDN_CODES: { [k: string]: string } = {
 }
 
 export function exportLHDNReference(
-  records: Record[],
+  records: ReliefRecord[],
   profile: Profile,
   reliefTotals: { [catId: string]: number },
   taxYear: string
@@ -290,7 +290,7 @@ export function exportLHDNReference(
       rec.date,
       `"${catName}"`,
       `"${rec.merchant.replace(/"/g, '""')}"`,
-      `"${rec.description.replace(/"/g, '""')}"`,
+      `"${(rec.description ?? '').replace(/"/g, '""')}"`,
       rec.amount.toFixed(2),
       rec.status,
     ].join(','))

@@ -43,6 +43,20 @@ interface Props {
 
 const MAX_CONCURRENT = 3
 
+// blob: URLs only live as long as the tab/component that created them —
+// unsuitable for a value that gets persisted into a record's receiptUrl
+// and read back after this component unmounts (or the page reloads). Use
+// a self-contained data: URL instead, matching the single-record upload
+// flow's FileReader.readAsDataURL approach.
+function fileToDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = () => reject(reader.error ?? new Error('Failed to read file'))
+    reader.readAsDataURL(file)
+  })
+}
+
 export function BulkQueue({ files, onDone, onCancel, onSave, recallCategory }: Props) {
   const [queue, setQueue] = useState<QueueItem[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -55,22 +69,22 @@ export function BulkQueue({ files, onDone, onCancel, onSave, recallCategory }: P
   const dragStartX = useRef(0)
   const cardRef = useRef<HTMLDivElement>(null)
 
-  // Initialize queue from files
+  // Initialize queue from files. Uses data: URLs (not URL.createObjectURL)
+  // because previewUrl doubles as the persisted receiptUrl once a card is
+  // saved — a blob: URL only lives as long as this component stays mounted
+  // and would leave saved records pointing at a dead reference the moment
+  // the user leaves the bulk-upload screen. No revocation/cleanup needed.
   useEffect(() => {
-    const items: QueueItem[] = files.map((file) => ({
+    let cancelled = false
+    Promise.all(files.map(async (file) => ({
       file,
-      previewUrl: URL.createObjectURL(file),
-      status: 'pending',
-    }))
-    setQueue(items)
+      previewUrl: await fileToDataURL(file),
+      status: 'pending' as const,
+    }))).then((items) => {
+      if (!cancelled) setQueue(items)
+    })
+    return () => { cancelled = true }
   }, [files])
-
-  // Cleanup object URLs on unmount
-  useEffect(() => {
-    return () => {
-      queue.forEach((item) => URL.revokeObjectURL(item.previewUrl))
-    }
-  }, [queue])
 
   const processFile = useCallback(async (index: number) => {
     if (processingSet.current.has(index)) return
@@ -335,7 +349,7 @@ export function BulkQueue({ files, onDone, onCancel, onSave, recallCategory }: P
                   <Label className="text-xs text-muted-foreground">Category</Label>
                   {editData.confidence > 0 && (
                     <Badge variant="outline" className="text-xs h-4 px-1.5">
-                      {Math.round(editData.confidence)}% conf.
+                      {Math.round(editData.confidence * 100)}% conf.
                     </Badge>
                   )}
                 </div>

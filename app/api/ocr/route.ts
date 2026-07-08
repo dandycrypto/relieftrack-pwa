@@ -1,18 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { spawn, spawnSync } from 'child_process'
-import { writeFile, unlink, mkdir, readFile } from 'fs/promises'
-import { existsSync } from 'fs'
-import path from 'path'
+import { spawn } from 'child_process'
+import { requireAuth } from '@/lib/api-auth'
+import { isRateLimited } from '@/lib/rate-limit'
 import {
   parseDate,
   extractAmount,
   detectCurrency,
-  detectTaxExempt,
   extractVendor,
   extractInvoiceNumber,
   suggestCategory,
-  extractLineItems,
-  extractNotes,
   extractTaxAmount,
   KWSP_MEMBER_PATTERNS,
   TIN_PATTERNS,
@@ -20,80 +16,83 @@ import {
   extractFirstMatch,
 } from '@/lib/ocr-parsers'
 
+// OCR is compute-heavy (RapidOCR / pdftotext); cap requests per user.
+const RATE_LIMIT_MAX = 20
+const RATE_LIMIT_WINDOW_MS = 60_000
+
 export const runtime = 'nodejs'
 export const maxDuration = 60
 
-// ── OCR script path (relative to project root, works in dev + prod standalone) ──
-const OCR_SCRIPT = path.join(process.cwd(), 'scripts', 'ocr_rapid.py')
-
-// ── v2 FastAPI microservice (port 8001) ──────────────────────────────────────
+// ── FastAPI OCR microservice — backend for images and scanned PDFs ──────────
+// Handles image OCR (RapidOCR) and PDF-as-image OCR fallback, EA Form
+// detection, and general receipt extraction. See ocr_service/ (run with
+// `uvicorn ocr_service.main:app`).
 const OCR_SERVICE_URL = process.env.OCR_SERVICE_URL || 'http://127.0.0.1:8001'
 const OCR_SERVICE_TIMEOUT_MS = 30000
 
-/**
- * Run server-side RapidOCR via Python subprocess.
- * Returns parsed JSON output from ocr_rapid.py: { rawText, confidence, lines, ... }
- */
-async function runRapidOCR(imagePath: string, timeoutMs = 45000): Promise<{
-  rawText: string
-  confidence: number
-  lines: Array<{ text: string; confidence: number; bbox: number[][] }>
-  preprocessed?: boolean
-  elapsed_ms?: number
-}> {
-  const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve, reject) => {
-    const proc = spawn('python3', [OCR_SCRIPT, imagePath], { timeout: timeoutMs })
-    let stdout = '', stderr = ''
-    proc.stdout.on('data', (data) => { stdout += data.toString() })
-    proc.stderr.on('data', (data) => { stderr += data.toString() })
-    proc.on('close', (code) => resolve({ stdout, stderr, code: code || 0 }))
-    proc.on('error', (err) => reject(err))
+// ── pdftotext fast path for digital (text-layer) PDFs ────────────────────────
+// `pdftotext -layout` preserves column alignment, which produces much
+// cleaner text than a linear text-extraction library for government forms
+// with dot-leader fill-in fields (e.g. Malaysian EA forms) — a plain reading-
+// order extraction interleaves the leader dots with the digits it's meant to
+// separate. Reads/writes via stdin/stdout so no temp files are needed. If the
+// `pdftotext` binary isn't available on this host, it fails soft and the
+// caller falls back to the OCR microservice's own PDF handling.
+const PDFTOTEXT_TIMEOUT_MS = 15000
+const MIN_PDFTOTEXT_CHARS = 100
+
+function runPdfToText(buffer: Buffer): Promise<string> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (text: string) => {
+      if (!settled) {
+        settled = true
+        resolve(text)
+      }
+    }
+    try {
+      const proc = spawn('pdftotext', ['-layout', '-', '-'], { timeout: PDFTOTEXT_TIMEOUT_MS })
+      let stdout = ''
+      proc.stdout.on('data', (d) => { stdout += d.toString('utf8') })
+      proc.on('close', () => finish(stdout))
+      proc.on('error', () => finish('')) // binary missing or failed to spawn
+      proc.stdin.on('error', () => {}) // ignore EPIPE if the process exits early
+      proc.stdin.write(buffer)
+      proc.stdin.end()
+    } catch {
+      finish('')
+    }
   })
-  if (result.code !== 0) {
-    console.error('[OCR] script exit', result.code, 'stderr:', result.stderr.slice(0, 500))
-    throw new Error(`OCR script exited with code ${result.code}: ${result.stderr.slice(0, 200)}`)
-  }
-  try {
-    return JSON.parse(result.stdout)
-  } catch (e) {
-    throw new Error(`OCR JSON parse failed: ${e instanceof Error ? e.message : e}`)
-  }
 }
 
-/**
- * v2 OCR: Proxy to FastAPI microservice on port 8001.
- * Returns the full structured result with vendor/date/amount/tax/etc.
- * Falls back to v1 (runRapidOCR + client parser) if v2 service is down.
- */
-async function runRapidOCRv2(imagePath: string, timeoutMs = OCR_SERVICE_TIMEOUT_MS): Promise<{
-  rawText: string
+interface OcrServiceResult {
+  vendor: string | null
+  date: string | null
+  time: string | null
+  amount: number | null
+  tax_amount: number | null
+  tax_type: string | null
+  currency: string | null
+  category: string | null
+  invoice_number: string | null
+  tin: string | null
+  sst_registration_no: string | null
+  raw_text: string
   confidence: number
-  lines: Array<{ text: string; confidence: number; bbox: number[][] }>
-  vendor?: string | null
-  date?: string | null
-  time?: string | null
-  amount?: number | null
-  tax_amount?: number | null
-  tax_type?: string | null
-  currency?: string | null
-  category?: string | null
-  invoice_number?: string | null
-  tin?: string | null
-  sst_registration_no?: string | null
-  document_type?: string | null
-  extraction_method?: string | null
-  needs_review?: boolean
+  extraction_method: string | null
+  needs_review: boolean
+  document_type: string | null
   confidence_band?: string
   elapsed_ms?: number
-}> {
-  const { readFile } = await import('fs/promises')
-  const buffer = await readFile(imagePath)
-  const blob = new Blob([buffer], { type: 'image/jpeg' })
+}
+
+async function runOcrService(buffer: Buffer, filename: string, mimeType: string): Promise<OcrServiceResult> {
+  const blob = new Blob([buffer], { type: mimeType })
   const form = new FormData()
-  form.append('file', blob, path.basename(imagePath))
+  form.append('file', blob, filename)
 
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  const timeout = setTimeout(() => controller.abort(), OCR_SERVICE_TIMEOUT_MS)
 
   try {
     const res = await fetch(`${OCR_SERVICE_URL}/ocr`, {
@@ -103,33 +102,13 @@ async function runRapidOCRv2(imagePath: string, timeoutMs = OCR_SERVICE_TIMEOUT_
     })
     clearTimeout(timeout)
     if (!res.ok) {
-      throw new Error(`OCR service HTTP ${res.status}`)
+      const body = await res.text().catch(() => '')
+      throw new Error(`OCR service HTTP ${res.status}: ${body.slice(0, 200)}`)
     }
-    const data = (await res.json()) as Record<string, unknown>
-    return {
-      rawText: String(data.raw_text || data.rawText || ''),
-      confidence: Number(data.confidence || 0),
-      lines: (data.lines as any) || [],
-      vendor: data.vendor as string | null ?? null,
-      date: data.date as string | null ?? null,
-      time: data.time as string | null ?? null,
-      amount: data.amount as number | null ?? null,
-      tax_amount: data.tax_amount as number | null ?? null,
-      tax_type: data.tax_type as string | null ?? null,
-      currency: data.currency as string | null ?? null,
-      category: data.category as string | null ?? null,
-      invoice_number: data.invoice_number as string | null ?? null,
-      tin: data.tin as string | null ?? null,
-      sst_registration_no: data.sst_registration_no as string | null ?? null,
-      document_type: data.document_type as string | null ?? null,
-      extraction_method: data.extraction_method as string | null ?? null,
-      needs_review: Boolean(data.needs_review),
-      confidence_band: data.confidence_band as string | undefined,
-      elapsed_ms: Number(data.elapsed_ms || 0),
-    }
+    return (await res.json()) as OcrServiceResult
   } catch (e) {
     clearTimeout(timeout)
-    throw new Error(`OCR v2 service failed: ${e instanceof Error ? e.message : e}`)
+    throw e instanceof Error ? e : new Error('OCR service request failed')
   }
 }
 
@@ -183,7 +162,7 @@ function isEAForm(rawText: string): { detected: boolean; score: number; matched:
   return { detected: score >= 2, score, matched }
 }
 
-// Format name: "DANDYLAUJINGHUI" → "DANDY LAU JING HUI"
+// Format name: "TANWEIMING" → "TAN WEI MING"
 function formatEAFormName(name: string): string {
   // Mixed-case names (e.g., "DandyLauJingHui")
   const mixed = name
@@ -191,7 +170,7 @@ function formatEAFormName(name: string): string {
     .replace(/([a-z])([A-Z])/g, '$1 $2')
   if (mixed.includes(' ')) return mixed
 
-  // ALL CAPS names (e.g., "DANDYLAUJINGHUI")
+  // ALL CAPS names (e.g., "TANWEIMING")
   if (name === name.toUpperCase() && !name.includes(' ')) {
     // Strategy: find known Chinese name components, split around them
     // Common Chinese name parts: LAU, JING, HUI, WONG, TAN, LIM, etc.
@@ -231,7 +210,7 @@ function formatEAFormName(name: string): string {
 }
 
 /**
- * Parse EA Form from pdftotext -layout output.
+ * Parse EA Form from pdftotext/pdfplumber -layout output.
  * The layout-formatted text has proper spaces, line breaks, and aligned columns.
  * Much cleaner than OCR — name already has proper spacing, amounts are clean.
  */
@@ -265,7 +244,7 @@ function parseEAFormFromPDF(rawText: string): EAFormData | null {
 
   // ── Employee Name ──
   // pdftotext layout: the name appears after "1." and before "Nama Penuh Pekerja"
-  // e.g. "1.   DANDY LAU JING HUI   Nama Penuh Pekerja / Pesara ..."
+  // e.g. "1.   TAN WEI MING   Nama Penuh Pekerja / Pesara ..."
   // Strategy: find line that starts (after whitespace) with a number and then a name
   // The name is on a line that contains "Nama Penuh Pekerja" on the same line but the name comes BEFORE that label
   const nameMatch = rawText.match(/1\.\s+([A-Z][A-Z\s]{2,50}?)\s+Nama\s+Penuh\s+Pekerja/i)
@@ -280,7 +259,7 @@ function parseEAFormFromPDF(rawText: string): EAFormData | null {
   }
 
   // ── IC Number ──
-  // "No. K.P. Baru  910828-12-7099"
+  // "No. K.P. Baru  880101-14-5566"
   const icMatch = rawText.match(/\b([0-9]{6}[-\s]?[0-9]{2}[-\s]?[0-9]{4})\b/)
   if (icMatch) {
     result.icNumber = icMatch[1].replace(/\s+/g, '').replace(/-/g, '').replace(/(\d{6})(\d{2})(\d{4})/, '$1-$2-$3')
@@ -341,7 +320,7 @@ function parseEAFormFromPDF(rawText: string): EAFormData | null {
   if (eaNum) result.eaFormNumber = eaNum
 
   // ── Employer Name ──
-  // "Nama dan Alamat Majikan  NIPPON KOEI MOBILITY SDN BHD"
+  // "Nama dan Alamat Majikan  ACME MANUFACTURING SDN BHD"
   // The employer name appears on the line(s) following "Nama dan Alamat Majikan"
   const majikanIdx = rawText.search(/Nama\s+dan\s+Alamat\s+Majikan/i)
   if (majikanIdx >= 0) {
@@ -370,7 +349,7 @@ function parseEAForm(rawText: string): EAFormData | null {
   const result: EAFormData = {
     employeeName: '',
     icNumber: '',
-    employerName: 'NIPPON KOEI MOBILITY SDN BHD',
+    employerName: '',
     taxYear: new Date().getFullYear(),
     grossIncome: 0,
     epfContribution: 0,
@@ -390,7 +369,7 @@ function parseEAForm(rawText: string): EAFormData | null {
   }
 
   // ── Employee Name ──
-  // "BUTIRANPEKERJA\nDANDYLAUJINGHUI" — name on line after BUTIRANPEKERJA
+  // "BUTIRANPEKERJA\nTANWEIMING" — name on line after BUTIRANPEKERJA
   // Stop at newline or non-name chars (NamaPenuhPekerja label)
   const nameMatch = rawText.match(/BUTIRANPEKERJA\s*\n\s*([A-Z][A-Za-z\s]{3,60})/i)
   if (nameMatch) {
@@ -464,11 +443,6 @@ function parseEAForm(rawText: string): EAFormData | null {
         if (num > 0) result.socsoContribution = num
       }
     }
-
-    // Fallback: if SOCSO still not found, check direct amount presence
-    if (result.socsoContribution === 0 && carumanSection.includes('422.10')) {
-      result.socsoContribution = 422.10
-    }
   }
 
   // ── PCB Paid (JUMLAHPOTONGAN = Total Deductions) ──
@@ -496,6 +470,14 @@ function parseEAForm(rawText: string): EAFormData | null {
 
 export async function POST(request: NextRequest) {
   try {
+    const user = await requireAuth(request)
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+    if (isRateLimited(`ocr:${user.id}`, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS)) {
+      return NextResponse.json({ error: 'Too many requests. Please slow down.' }, { status: 429 })
+    }
+
     const formData = await request.formData()
     const file = formData.get('file') as File | null
 
@@ -515,231 +497,126 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'File too large. Max size: 10MB' }, { status: 400 })
     }
 
-    // Write uploaded file to temp location
-    const tmpDir = '/tmp/ocr_uploads'
-    if (!existsSync(tmpDir)) {
-      await mkdir(tmpDir, { recursive: true })
-    }
-
-    const ext = file.name.split('.').pop() || 'png'
-    const tmpPath = path.join(tmpDir, `ocr_${Date.now()}.${ext}`)
     const buffer = Buffer.from(await file.arrayBuffer())
 
-    // ── Magic bytes validation (before writing file) ────────────────────────
+    // ── Magic bytes validation ───────────────────────────────────────────
     const isPDF = buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46
     const isJPEG = buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF
     const isPNG = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47
     if (!isPDF && !isJPEG && !isPNG) {
       return NextResponse.json({ error: 'Invalid file content. File does not appear to be a valid JPEG, PNG, or PDF.' }, { status: 400 })
     }
-    // Override ext based on validated magic bytes (prevent extension spoofing)
-    const validatedExt = isPDF ? 'pdf' : isJPEG ? 'jpg' : 'png'
 
-    await writeFile(tmpPath, buffer)
-
-    // ── PDF: try pdftotext first, fall back to OCR if empty ─────────────────
+    // ── Extract text ──────────────────────────────────────────────────────
+    // For PDFs, try the fast native-text-layer path first (pdftotext) — it's
+    // more accurate for structured forms and doesn't need the OCR service at
+    // all. Fall back to the OCR microservice (RapidOCR) for images and for
+    // PDFs with no usable text layer (scanned documents).
     let rawText = ''
-    let pdfUsedPdftotext = false
-    let pdfPath: string | null = null
+    let extractionMethod = 'unknown'
+    let serviceResult: OcrServiceResult | null = null
 
-    if (ext.toLowerCase() === 'pdf') {
-      const baseName = path.basename(tmpPath, '.pdf')
-      const txtOutPath = path.join(tmpDir, `${baseName}.txt`)
+    if (isPDF) {
+      const pdfText = await runPdfToText(buffer)
+      if (pdfText.trim().length >= MIN_PDFTOTEXT_CHARS) {
+        rawText = pdfText
+        extractionMethod = 'pdftotext'
+      }
+    }
 
+    if (!rawText) {
       try {
-        // Step 1: try pdftotext -layout (native PDF text extraction)
-        const r1 = spawnSync('pdftotext', ['-layout', tmpPath, txtOutPath], { timeout: 30000 })
-        if (r1.error) throw r1.error
-        const pdfRaw = await readFile(txtOutPath, 'utf8')
-
-        if (pdfRaw.trim().length > 100) {
-          // Good native text — use it directly with pdftotext parser
-          rawText = pdfRaw
-          pdfUsedPdftotext = true
-          console.log('[OCR] pdftotext successful, chars:', pdfRaw.length)
-        } else {
-          // Empty output (scanned PDF) — fall through to OCR
-          console.log('[OCR] pdftotext returned empty (< 100 chars), falling back to OCR')
-        }
-      } catch (pdfErr) {
-        console.error('[OCR] pdftotext failed, falling back to OCR:', pdfErr)
+        serviceResult = await runOcrService(buffer, file.name, file.type)
+      } catch (e) {
+        console.error('[OCR] service call failed:', e instanceof Error ? e.message : e)
+        return NextResponse.json({ error: 'OCR service unavailable. Please try again shortly.' }, { status: 502 })
       }
+      rawText = serviceResult.raw_text || ''
+      extractionMethod = serviceResult.extraction_method || extractionMethod
+    }
 
-      // If pdftotext didn't work, convert PDF pages to images for OCR
-      if (!pdfUsedPdftotext) {
-        const imgBase = path.join(tmpDir, baseName)
-        const r2 = spawnSync('pdftoppm', ['-jpeg', '-r', '200', tmpPath, imgBase], { timeout: 60000 })
-        if (r2.error) throw r2.error
-        const { readdirSync } = await import('fs')
-        const files = readdirSync(tmpDir).filter(f => f.startsWith(baseName) && f.endsWith('.jpg'))
-        const imagePaths = files.sort().map(f => path.join(tmpDir, f))
-
-        if (imagePaths.length === 0) {
-          return NextResponse.json({ error: 'PDF page conversion failed' }, { status: 500 })
-        }
-
-        // OCR all pages
-        interface PageOCRResult { rawText: string; json: Record<string, unknown> }
-        const pageResults: PageOCRResult[] = []
-        for (const imgPath of imagePaths) {
-          try {
-            const json = await runRapidOCR(imgPath)
-            pageResults.push({ rawText: json.rawText || '', json: json as unknown as Record<string, unknown> })
-          } catch (e) {
-            console.error('[OCR] page failed:', imgPath, e instanceof Error ? e.message : e)
-          }
-          // Clean up image
-          try { await unlink(imgPath) } catch {}
-        }
-
-        if (pageResults.length === 0) {
-          return NextResponse.json({ error: 'OCR processing failed — no pages could be processed' }, { status: 500 })
-        }
-
-        rawText = pageResults.map(p => p.rawText).join('\n\n--- PAGE BREAK ---\n\n')
-        const parsed = pageResults[0].json as Record<string, unknown>
-
-        // Clean up PDF temp file
-        try { await unlink(tmpPath) } catch {}
-        try { await unlink(txtOutPath) } catch {}
-
-        // EA Form parsing for OCR path
-        let eaFormData: EAFormData | null = null
-        if (rawText && rawText.length > 50) {
-          const eaCheck = isEAForm(rawText)
-          console.log('[OCR] isEAForm (OCR fallback):', eaCheck.detected, '| score:', eaCheck.score)
-          if (eaCheck.detected) {
-            eaFormData = parseEAForm(rawText)
-          }
-        }
-
-        return NextResponse.json({
-          vendor: eaFormData?.employerName ?? 'Unknown Employer',
-          date: eaFormData ? `${eaFormData.taxYear}-12-31` : null,
-          time: null,
-          amount: eaFormData?.grossIncome ?? null,
-          tax_amount: null,
-          tax_type: null,
-          currency: 'MYR',
-          category: 'lifestyle',
-          invoice_number: null,
-          tin: null,
-          sst_registration_no: null,
-          raw_text: rawText,
-          confidence: parsed.confidence ?? 0,
-          extraction_method: 'paddleocr_rule',
-          needs_review: false,
-          document_type: 'ea_form',
-          eaFormData,
-        })
+    // ── EA Form detection & structured parsing ────────────────────────────
+    // The Python service's own EA-form extraction is tuned for generic
+    // English-labeled forms; real Malaysian EA forms use Malay section
+    // labels (KWSP, PERKESO, JUMLAH), so we re-parse the raw text here with
+    // parsers tuned to that layout instead of trusting the service's fields.
+    let eaFormData: EAFormData | null = null
+    if (rawText.length > 50) {
+      const eaCheck = isEAForm(rawText)
+      if (eaCheck.detected) {
+        eaFormData = extractionMethod === 'pdftotext' || extractionMethod === 'pdfplumber'
+          ? parseEAFormFromPDF(rawText)
+          : parseEAForm(rawText)
       }
+    }
 
-      // pdftotext succeeded — parse with PDF-specific parser
-      pdfPath = tmpPath
-
-    } else {
-      // ── Photo: use RapidOCR directly ───────────────────────────────────────
-      let parsed: { rawText: string; confidence: number; lines?: unknown[]; [k: string]: unknown }
-      let usedV2 = false
-      // Try v2 (FastAPI service) first — richer extraction (vendor, date, amount, SST, TIN, etc.)
-      try {
-        parsed = await runRapidOCRv2(tmpPath)
-        usedV2 = true
-        console.log('[OCR] v2 service succeeded')
-      } catch (v2Err) {
-        // Fall back to v1 (subprocess + client-side parser)
-        console.warn('[OCR] v2 service failed, falling back to v1:', v2Err instanceof Error ? v2Err.message : v2Err)
-        try {
-          parsed = await runRapidOCR(tmpPath)
-        } catch (v1Err) {
-          const msg = v1Err instanceof Error ? v1Err.message : 'OCR processing failed'
-          console.error('[OCR] photo failed (v1 fallback):', msg)
-          return NextResponse.json({ error: msg }, { status: 500 })
-        }
-      }
-
-      rawText = parsed.rawText || ''
-
-      // Clean up
-      try { await unlink(tmpPath) } catch {}
-
-      // EA Form parsing for photo OCR
-      let eaFormData: EAFormData | null = null
-      if (rawText && rawText.length > 50) {
-        const eaCheck = isEAForm(rawText)
-        if (eaCheck.detected) {
-          eaFormData = parseEAForm(rawText)
-        }
-      }
-
-      // Python FastAPI returns snake_case OcrResult directly.
-      // v1 fallback: derive what we can from rawText.
-      const derivedCategory = usedV2 ? (parsed.category ?? null) : suggestCategory(rawText)
+    if (eaFormData) {
       return NextResponse.json({
-        vendor: usedV2 ? (parsed.vendor ?? null) : extractVendor(rawText),
-        date: usedV2 ? (parsed.date ?? null) : parseDate(rawText).date,
-        time: usedV2 ? (parsed.time ?? null) : parseDate(rawText).time,
-        amount: usedV2 ? (parsed.amount ?? null) : extractAmount(rawText),
-        tax_amount: usedV2 ? (parsed.tax_amount ?? null) : extractTaxAmount(rawText),
-        tax_type: usedV2 ? (parsed.tax_type ?? null) : null,
-        currency: usedV2 ? (parsed.currency ?? 'MYR') : detectCurrency(rawText),
-        category: derivedCategory,
-        invoice_number: usedV2 ? (parsed.invoice_number ?? null) : extractInvoiceNumber(rawText),
-        tin: usedV2 ? (parsed.tin ?? null) : null,
-        sst_registration_no: usedV2 ? (parsed.sst_registration_no ?? null) : null,
+        vendor: eaFormData.employerName || 'Unknown Employer',
+        date: `${eaFormData.taxYear}-12-31`,
+        time: null,
+        amount: eaFormData.grossIncome || null,
+        tax_amount: null,
+        tax_type: null,
+        currency: 'MYR',
+        category: 'lifestyle',
+        invoice_number: null,
+        tin: null,
+        sst_registration_no: null,
         raw_text: rawText,
-        confidence: parsed.confidence ?? 0,
-        extraction_method: usedV2 ? (parsed.extraction_method ?? null) : 'paddleocr_rule',
-        needs_review: usedV2 ? Boolean(parsed.needs_review) : true,
-        document_type: usedV2 ? (parsed.document_type ?? null) : 'unknown',
+        confidence: serviceResult?.confidence ?? 1.0,
+        extraction_method: extractionMethod,
+        needs_review: false,
+        document_type: 'ea_form',
         eaFormData,
       })
     }
 
-    // ── PDF with pdftotext: EA Form parsing ────────────────────────────────
-    let eaFormData: EAFormData | null = null
-    if (rawText && rawText.length > 50) {
-      const eaCheck = isEAForm(rawText)
-      console.log('[OCR] isEAForm (pdftotext):', eaCheck.detected, '| score:', eaCheck.score, '| matched:', eaCheck.matched)
-
-      if (eaCheck.detected) {
-        // Use pdftotext-native parser for cleaner results
-        eaFormData = parseEAFormFromPDF(rawText)
-        // Redacted: do not log full EA form data (may contain PII)
-      } else {
-        console.log('[OCR] Not detected as EA Form via pdftotext text, skipping')
-      }
+    // ── Non-EA-form result ─────────────────────────────────────────────────
+    if (serviceResult) {
+      // Came from the OCR microservice — it already extracted structured
+      // fields (works for receipt/invoice photos and scanned PDFs alike).
+      return NextResponse.json({
+        vendor: serviceResult.vendor,
+        date: serviceResult.date,
+        time: serviceResult.time,
+        amount: serviceResult.amount,
+        tax_amount: serviceResult.tax_amount,
+        tax_type: serviceResult.tax_type,
+        currency: serviceResult.currency || 'MYR',
+        category: serviceResult.category,
+        invoice_number: serviceResult.invoice_number,
+        tin: serviceResult.tin,
+        sst_registration_no: serviceResult.sst_registration_no,
+        raw_text: rawText,
+        confidence: serviceResult.confidence,
+        extraction_method: serviceResult.extraction_method,
+        needs_review: serviceResult.needs_review,
+        document_type: serviceResult.document_type,
+        eaFormData: null,
+      })
     }
 
-    // Clean up
-    const cleanupPaths = [tmpPath]
-    if (pdfPath && pdfPath !== tmpPath) cleanupPaths.push(pdfPath)
-    const baseName = path.basename(tmpPath, '.pdf')
-    const txtOutPath = path.join(tmpDir, `${baseName}.txt`)
-    cleanupPaths.push(txtOutPath)
-    for (const p of cleanupPaths) {
-      try { await unlink(p) } catch {}
-    }
-
-    // Return minimal response for PDF (no receipt parsing — EA Form only)
+    // Came from pdftotext — run the shared receipt parsers on the clean
+    // digital text layer (no OCR uncertainty, so confidence is high).
     return NextResponse.json({
-      vendor: eaFormData?.employerName ?? 'Unknown Employer',
-      date: eaFormData ? `${eaFormData.taxYear}-12-31` : null,
-      time: null,
-      amount: eaFormData?.grossIncome ?? null,
-      tax_amount: null,
+      vendor: extractVendor(rawText),
+      date: parseDate(rawText).date,
+      time: parseDate(rawText).time,
+      amount: extractAmount(rawText),
+      tax_amount: extractTaxAmount(rawText),
       tax_type: null,
-      currency: 'MYR',
-      category: 'lifestyle',
-      invoice_number: null,
+      currency: detectCurrency(rawText),
+      category: suggestCategory(rawText),
+      invoice_number: extractInvoiceNumber(rawText),
       tin: null,
       sst_registration_no: null,
       raw_text: rawText,
       confidence: 1.0,
-      extraction_method: 'pdfplumber',
+      extraction_method: 'pdftotext',
       needs_review: false,
-      document_type: 'ea_form',
-      eaFormData,
+      document_type: 'unknown',
+      eaFormData: null,
     })
   } catch (err) {
     console.error('[OCR] Route error:', err instanceof Error ? err.message : err)
@@ -749,6 +626,3 @@ export async function POST(request: NextRequest) {
     )
   }
 }
-
-// Parsing utilities are imported from @/lib/ocr-parsers at the top of the file.
-

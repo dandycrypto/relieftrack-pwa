@@ -176,10 +176,13 @@ CREATE TABLE public.drive_connections (
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT one_active_connection UNIQUE (user_id) WHERE is_active = TRUE
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Partial unique index (not a table CONSTRAINT — PostgreSQL doesn't support
+-- WHERE clauses on table-level UNIQUE constraints) enforcing at most one
+-- active Drive connection per user.
+CREATE UNIQUE INDEX one_active_connection ON public.drive_connections(user_id) WHERE is_active = TRUE;
 
 -- ============================================================================
 -- INDEXES
@@ -338,6 +341,9 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Calculate total relief amount for a user (for dashboard)
+-- SECURITY DEFINER bypasses RLS on public.records, so it must enforce its own
+-- ownership check: only the record owner, or the trusted service_role
+-- (server-side, no user JWT), may query a given p_user_id.
 CREATE OR REPLACE FUNCTION public.get_user_total_relief(
     p_user_id UUID,
     p_tax_year INTEGER DEFAULT EXTRACT(YEAR FROM NOW())
@@ -346,6 +352,10 @@ RETURNS NUMERIC(12, 2) AS $$
 DECLARE
     v_total NUMERIC(12, 2);
 BEGIN
+    IF auth.uid() IS DISTINCT FROM p_user_id AND auth.role() <> 'service_role' THEN
+        RAISE EXCEPTION 'not authorized';
+    END IF;
+
     SELECT COALESCE(SUM(amount), 0)
     INTO v_total
     FROM public.records
@@ -359,12 +369,17 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- Get relief breakdown by category for a user
+-- Same ownership check as get_user_total_relief above.
 CREATE OR REPLACE FUNCTION public.get_user_relief_by_category(
     p_user_id UUID,
     p_tax_year INTEGER DEFAULT EXTRACT(YEAR FROM NOW())
 )
 RETURNS TABLE(category TEXT, total NUMERIC(12, 2), count BIGINT) AS $$
 BEGIN
+    IF auth.uid() IS DISTINCT FROM p_user_id AND auth.role() <> 'service_role' THEN
+        RAISE EXCEPTION 'not authorized';
+    END IF;
+
     RETURN QUERY
     SELECT
         r.category,
@@ -411,7 +426,12 @@ CREATE POLICY "Users can delete own receipts"
 -- SUMMARY VIEW (for dashboard analytics)
 -- ============================================================================
 
-CREATE OR REPLACE VIEW public.dashboard_summary AS
+-- security_invoker: run this view with the QUERYING user's own permissions
+-- (so RLS on public.records applies) instead of the view owner's elevated
+-- permissions — without this, any authenticated user could pass another
+-- user's user_id in the .eq() filter and read their aggregated totals.
+CREATE OR REPLACE VIEW public.dashboard_summary
+WITH (security_invoker = true) AS
 SELECT
     r.user_id,
     EXTRACT(YEAR FROM r.date) AS tax_year,
@@ -442,6 +462,16 @@ CREATE TABLE IF NOT EXISTS public.lhdn_categories (
     active BOOLEAN NOT NULL DEFAULT TRUE
 );
 
+-- Reference data, not user-owned, but RLS must still be enabled — otherwise
+-- the public anon key (shipped to every client) can INSERT/UPDATE/DELETE
+-- these rows directly via PostgREST, corrupting relief caps for every user.
+-- Anyone may read; only the service role (migrations) may write.
+ALTER TABLE public.lhdn_categories ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Anyone can view LHDN categories"
+    ON public.lhdn_categories FOR SELECT
+    USING (true);
+
 INSERT INTO public.lhdn_categories (id, name, max_limit, icon, description, always_show, profile_key, per_item) VALUES
     ('individual', 'Individual & Dependent Relatives', 9000, 'User', 'Automatic relief for all taxpayers', TRUE, NULL, FALSE),
     ('medical_self', 'Medical (Self, Spouse, Children)', 10000, 'Stethoscope', 'Serious diseases, fertility treatment, vaccination', TRUE, NULL, FALSE),
@@ -452,7 +482,7 @@ INSERT INTO public.lhdn_categories (id, name, max_limit, icon, description, alwa
     ('children_under18', 'Children (Under 18)', 2000, 'Users', 'Per child relief', FALSE, 'has_children_under_18', TRUE),
     ('children_education', 'Children (Higher Education)', 8000, 'GraduationCap', 'Children in tertiary education', FALSE, 'has_children_education', TRUE),
     ('education_self', 'Education (Self)', 7000, 'GraduationCap', 'Degree, Masters, professional courses', TRUE, NULL, FALSE),
-    ('lifestyle', 'Lifestyle', 2500, 'Smartphone', 'Books, PC, smartphone, sports equipment, internet', TRUE, NULL, FALSE),
+    ('lifestyle', 'Lifestyle', 3500, 'Smartphone', 'Books, PC, smartphone, sports equipment, internet', TRUE, NULL, FALSE),
     ('epf_insurance', 'EPF / Life Insurance / Takaful', 7000, 'PiggyBank', 'Retirement and insurance contributions', TRUE, NULL, FALSE),
     ('housing_loan', 'First Home Housing Loan Interest', 7000, 'Building', 'Interest on first home loan', FALSE, 'is_first_home_owner', FALSE)
 ON CONFLICT (id) DO NOTHING;
