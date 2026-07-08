@@ -126,7 +126,7 @@ import InstallPWA from "@/components/InstallPWA"
 import { parseEWalletCSV, type EWalletProvider, type ParsedTransaction } from "@/lib/ewallet-parser"
 import StatementImport from "@/components/StatementImport"
 import type { DbRecord } from "@/lib/supabase"
-import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, computeTax, calculateTax, calculateNetTaxBalance, floorRM, type ReliefRecord } from "@/store"
+import { useReliefStore, useDemoStore, RELIEF_CATEGORIES, computeTax, calculateTax, calculateNetTaxBalance, floorRM, type ReliefRecord, type ReliefCategory, type RecurringTemplate } from "@/store"
 import { createSupabaseBrowserClient } from "@/utils/supabase/client"
 import { performOCR, type OcrResult } from "@/lib/ocr"
 import { verifyRecord, verifyEAForm, findDuplicates, type VerifyResult, type EAFormVerifyResult } from "@/lib/verify"
@@ -539,6 +539,599 @@ function getCategoryIcon(id: string) {
   const cat = RELIEF_CATEGORIES.find((c) => c.id === id)
   const iconName = cat?.icon || "FileText"
   return ICON_MAP[iconName] || FileText
+}
+
+// Distinct colors per category (day + dark mode safe)
+const COLOR_MAP: Record<string, { light: string; dark: string; hex: string }> = {
+  emerald:  { light: 'text-emerald-600',    dark: 'dark:text-emerald-400',    hex: '#059669' },
+  blue:     { light: 'text-blue-600',        dark: 'dark:text-blue-400',        hex: '#2563eb' },
+  rose:     { light: 'text-rose-600',        dark: 'dark:text-rose-400',        hex: '#e11d48' },
+  violet:   { light: 'text-violet-600',     dark: 'dark:text-violet-400',     hex: '#7c3aed' },
+  orange:   { light: 'text-orange-600',      dark: 'dark:text-orange-400',      hex: '#ea580c' },
+  pink:     { light: 'text-pink-600',       dark: 'dark:text-pink-400',       hex: '#db2777' },
+  cyan:     { light: 'text-cyan-600',        dark: 'dark:text-cyan-400',        hex: '#0891b2' },
+  teal:     { light: 'text-teal-600',        dark: 'dark:text-teal-400',        hex: '#0d9488' },
+  amber:    { light: 'text-amber-600',       dark: 'dark:text-amber-400',       hex: '#d97706' },
+  red:      { light: 'text-red-600',         dark: 'dark:text-red-400',         hex: '#dc2626' },
+  indigo:   { light: 'text-indigo-600',     dark: 'dark:text-indigo-400',     hex: '#4f46e5' },
+  sky:      { light: 'text-sky-600',         dark: 'dark:text-sky-400',         hex: '#0284c7' },
+}
+function getColor(colorId?: string) {
+  return COLOR_MAP[colorId || 'blue'] || COLOR_MAP['blue']
+}
+function getCategoryColor(categoryId: string) {
+  const cat = RELIEF_CATEGORIES.find((c) => c.id === categoryId)
+  return getColor(cat?.color)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RECORDS TAB
+// Hoisted to a top-level component (not defined inline inside ReliefTrackApp)
+// so its identity is stable across parent re-renders. Previously it was
+// redefined as a fresh closure on every render of ReliefTrackApp, which made
+// React treat it as a brand-new component type each time and remount its
+// entire subtree — destroying the search input's focus after every single
+// keystroke (confirmed: typing beyond one character was impossible).
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface RecordsTabProps {
+  t: ReturnType<typeof useT>
+  displayRecords: ReliefRecord[]
+  selectedYear: number
+  defaultTaxYear: string
+  applicableReliefs: ReliefCategory[]
+  reliefTotals: Record<string, number>
+  isDemoMode: boolean
+  updateRecord: (id: string, updates: Partial<ReliefRecord>) => void
+  syncToDrive: (action: 'saveRecord' | 'updateRecord' | 'deleteRecord', record?: ReliefRecord, recordId?: string) => void
+  syncRecordUpdateToSupabase: (id: string, updates: Partial<ReliefRecord>) => void
+  setDeleteOneId: (id: string | null) => void
+}
+
+function RecordsTab({
+  t,
+  displayRecords,
+  selectedYear,
+  defaultTaxYear,
+  applicableReliefs,
+  reliefTotals,
+  isDemoMode,
+  updateRecord,
+  syncToDrive,
+  syncRecordUpdateToSupabase,
+  setDeleteOneId,
+}: RecordsTabProps) {
+  const [searchQuery, setSearchQuery] = useState("")
+  const [filterCategory, setFilterCategory] = useState("all")
+  const [recordsView, setRecordsView] = useState<"list" | "chart">("list")
+  const [selectedRecord, setSelectedRecord] = useState<ReliefRecord | null>(null)
+  const [editingRecord, setEditingRecord] = useState<ReliefRecord | null>(null)
+  const [previewImage, setPreviewImage] = useState<string | null>(null) // fullscreen image preview
+  const [isRefreshing, setIsRefreshing] = useState(false)
+
+  const handleRefresh = () => {
+    setIsRefreshing(true)
+    toast.info("Data refreshed from local storage.")
+    setTimeout(() => setIsRefreshing(false), 800)
+  }
+
+  const filteredRecords = displayRecords.filter((r) => {
+    const recordYear = new Date(r.date).getFullYear()
+    const matchYear = recordYear === selectedYear
+    const matchSearch =
+      r.merchant.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (r.description ?? '').toLowerCase().includes(searchQuery.toLowerCase())
+    const matchCat = filterCategory === "all" || r.category === filterCategory
+    return matchYear && matchSearch && matchCat
+  })
+
+  const pieData = applicableReliefs.slice(0, 6).map((cat, i) => ({
+    name: cat.name.split(" ")[0],
+    value: reliefTotals[cat.id] || 0,
+    color: ["#059669", "#0d9488", "#0284c7", "#7c3aed", "#db2777", "#d97706"][
+      i
+    ],
+  })).filter((d) => d.value > 0)
+
+  const monthlyData = (() => {
+    const months: Record<string, number> = {}
+    displayRecords.forEach((r) => {
+      const m = r.date.slice(0, 7) // YYYY-MM
+      months[m] = (months[m] || 0) + r.amount
+    })
+    const sorted = Object.entries(months).sort()
+    const monthNames = [
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
+    ]
+    return sorted
+      .slice(-6)
+      .map(([m, val]) => ({
+        month: monthNames[parseInt(m.split("-")[1]) - 1] || m,
+        amount: val,
+      }))
+  })()
+
+  return (
+    <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
+      {/* Search and Filter */}
+      <div className="space-y-3 border-b border-border bg-background p-4">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            placeholder={t('searchRecords')}
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="pl-9"
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <Select value={filterCategory} onValueChange={setFilterCategory}>
+            <SelectTrigger className="h-9 w-[140px]">
+              <Filter className="mr-2 h-3 w-3" />
+              <SelectValue placeholder="Category" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Categories</SelectItem>
+              {RELIEF_CATEGORIES.map((cat) => (
+                <SelectItem key={cat.id} value={cat.id}>
+                  {cat.name.split(" ")[0]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div className="flex rounded-lg border border-input bg-background p-1">
+            <Button
+              variant={recordsView === "list" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-7 px-2"
+              onClick={() => setRecordsView("list")}
+            >
+              <FileText className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant={recordsView === "chart" ? "secondary" : "ghost"}
+              size="sm"
+              className="h-7 px-2"
+              onClick={() => setRecordsView("chart")}
+            >
+              <PieChart className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="ml-auto h-9"
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+          >
+            <RefreshCw
+              className={cn("h-4 w-4", isRefreshing && "animate-spin")}
+            />
+          </Button>
+        </div>
+      </div>
+
+      {/* Records List or Chart */}
+      <ScrollArea className="flex-1">
+          {recordsView === "list" ? (
+            <div className="overflow-hidden divide-y divide-border">
+            {filteredRecords.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 text-center">
+                <FileText className="h-12 w-12 text-muted-foreground/50" />
+                <p className="mt-3  text-muted-foreground">
+                  No records for YA {defaultTaxYear}
+                </p>
+                <p className=" text-muted-foreground">
+                  Add your first receipt to get started
+                </p>
+              </div>
+            ) : (
+              filteredRecords.map((record) => {
+                const Icon = getCategoryIcon(record.category)
+                return (
+                  <button
+                    key={record.id}
+                    className="flex w-full items-center gap-3 p-4 text-left transition-colors hover:bg-muted/50 overflow-hidden"
+                    onClick={() => setSelectedRecord(record)}
+                  >
+                    <div className="flex items-center gap-3 flex-1 min-w-0 overflow-hidden">
+                      {/* Icon with receipt dot */}
+                      <div className="relative shrink-0">
+                        <div
+                          className="flex h-10 w-10 items-center justify-center rounded-full"
+                          style={{ backgroundColor: getCategoryColor(record.category).hex + '1a' }}
+                        >
+                          <Icon className="h-5 w-5" style={{ color: getCategoryColor(record.category).hex }} />
+                        </div>
+                        {record.receiptUrl && (
+                          <div className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-emerald-500 border-2 border-background" title="Has receipt" />
+                        )}
+                      </div>
+
+                      {/* Description + Merchant stacked vertically */}
+                      <div className="flex-1 min-w-0 overflow-hidden">
+                        {/* Description — rolling if long */}
+                        <div className={cn("overflow-hidden", (record.description?.length ?? 0) > 30 && "marquee-wrapper")}>
+                          <p
+                            className={cn(
+                              "text-sm font-medium",
+                              (record.description?.length ?? 0) > 30
+                                ? "marquee-text whitespace-nowrap"
+                                : "truncate whitespace-nowrap"
+                            )}
+                            title={record.description}
+                          >
+                            {record.description}
+                          </p>
+                        </div>
+                        {/* Merchant — rolling if long */}
+                        <div className={cn("overflow-hidden", record.merchant?.length > 25 && "marquee-wrapper")}>
+                          <p
+                            className={cn(
+                              "text-xs text-muted-foreground",
+                              record.merchant?.length > 25
+                                ? "marquee-text whitespace-nowrap"
+                                : "truncate whitespace-nowrap"
+                            )}
+                            title={record.merchant}
+                          >
+                            {record.merchant}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Amount + Verified + Evidence + Sync */}
+                      <div className="flex items-center gap-2 shrink-0 min-w-0">
+                        <span className="text-sm font-semibold whitespace-nowrap">{formatRM(record.amount)}</span>
+                        {record.status === 'verified' ? (
+                          <BadgeCheck className="h-3.5 w-3.5 text-emerald-500 shrink-0" aria-label="Verified" />
+                        ) : (
+                          <Clock className="h-3.5 w-3.5 text-amber-500 shrink-0" aria-label="Pending review" />
+                        )}
+                        {record.receiptUrl ? (
+                          <Shield className="h-3 w-3 text-emerald-500 shrink-0" aria-label="Receipt attached — audit ready" />
+                        ) : record.category !== 'individual' ? (
+                          <AlertCircle className="h-3 w-3 text-red-400 shrink-0" aria-label="No receipt — not audit ready" />
+                        ) : null}
+                        {record.syncedToDrive ? (
+                          <Cloud className="h-3 w-3 text-sky-500 shrink-0" aria-label="Synced to Google Drive" />
+                        ) : (
+                          <RefreshCw className="h-3 w-3 text-amber-500 shrink-0 animate-spin" aria-label="Pending sync" />
+                        )}
+                      </div>
+                    </div>
+                  </button>
+                )
+              })
+            )}
+          </div>
+        ) : (
+          <div className="space-y-4 p-4">
+            {/* Recharts Pie */}
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">
+                  Relief Breakdown by Category
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {pieData.length > 0 ? (
+                  <div className="flex items-center justify-center gap-4">
+                    <ResponsiveContainer width="100%" height={160}>
+                      <RechartsPieChart>
+                        <Pie
+                          data={pieData}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={45}
+                          outerRadius={70}
+                          dataKey="value"
+                          paddingAngle={2}
+                        >
+                          {pieData.map((entry, i) => (
+                            <Cell key={i} fill={entry.color} />
+                          ))}
+                        </Pie>
+                        <Tooltip formatter={(v: number) => formatRM(v)} />
+                      </RechartsPieChart>
+                    </ResponsiveContainer>
+                    <div className="flex flex-col gap-2">
+                      {pieData.map((d) => (
+                        <div key={d.name} className="flex items-center gap-2">
+                          <div
+                            className="h-2.5 w-2.5 rounded-full"
+                            style={{ backgroundColor: d.color }}
+                          />
+                          <span className=" text-muted-foreground">
+                            {d.name}
+                          </span>
+                          <span className=" font-medium">
+                            {formatRM(d.value)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex h-40 items-center justify-center  text-muted-foreground">
+                    No data to display
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Monthly Bar Chart */}
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">Monthly Spending</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {monthlyData.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={140}>
+                    <BarChart
+                      data={monthlyData}
+                      margin={{ top: 5, right: 10, left: -20, bottom: 0 }}
+                    >
+                      <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+                      <YAxis
+                        tick={{ fontSize: 11 }}
+                        tickFormatter={(v) => `RM${(v / 1000).toFixed(0)}k`}
+                      />
+                      <Tooltip formatter={(v: number) => formatRM(v)} />
+                      <Bar
+                        dataKey="amount"
+                        fill="var(--primary)"
+                        radius={[4, 4, 0, 0]}
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="flex h-32 items-center justify-center  text-muted-foreground">
+                    No monthly data
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        )}
+      </ScrollArea>
+
+      {/* Record Detail Modal */}
+      <Drawer
+        open={!!selectedRecord}
+        onOpenChange={(o) => !o && setSelectedRecord(null)}
+      >
+        <DrawerContent className="max-h-[90vh] flex flex-col">
+          <DrawerHeader className="text-left">
+            <DrawerTitle>Record Details</DrawerTitle>
+          </DrawerHeader>
+          <div className="flex-1 overflow-y-auto px-4">
+            {selectedRecord && (
+              <div className="space-y-4 pb-4">
+                {/* Receipt preview */}
+                <div className="aspect-video overflow-hidden rounded-lg bg-muted">
+                  {selectedRecord.receiptUrl ? (
+                    <img
+                      src={selectedRecord.receiptUrl}
+                      alt="Receipt"
+                      className="h-full w-full object-contain cursor-pointer hover:opacity-90"
+                      onClick={() => setPreviewImage(selectedRecord.receiptUrl!)}
+                    />
+                  ) : (
+                    <div className="flex h-full items-center justify-center">
+                      <div className="text-center">
+                        <FileText className="mx-auto h-12 w-12 text-muted-foreground" />
+                        <p className="mt-2  text-muted-foreground">
+                          No receipt attached
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div className="space-y-2">
+                  {[
+                    [
+                      "Category",
+                      RELIEF_CATEGORIES.find((c) => c.id === selectedRecord.category)?.name,
+                    ],
+                    ["Date", selectedRecord.date],
+                    ["Amount", formatRM(selectedRecord.amount)],
+                    ["Merchant", selectedRecord.merchant],
+                    ["Description", selectedRecord.description],
+                    ["Status", selectedRecord.status],
+                  ].map(([label, value], i) => (
+                    <div key={i}>
+                      <div className="flex justify-between py-1.5">
+                        <span className=" text-muted-foreground">
+                          {label}
+                        </span>
+                        <span className=" font-medium text-foreground">
+                          {value}
+                        </span>
+                      </div>
+                      {i < 5 && <Separator />}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <DrawerFooter className="shrink-0 flex gap-2">
+            <Button
+              variant="outline"
+              className="h-12 text-base font-medium flex-1"
+              onClick={() => {
+                if (isDemoMode) {
+                  toast("Cannot edit records in demo mode")
+                  return
+                }
+                setSelectedRecord(null)
+                setEditingRecord(selectedRecord)
+              }}
+            >
+              <Edit2 className="mr-1 h-4 w-4" /> Edit
+            </Button>
+            <Button
+              variant="destructive"
+              className="h-12 text-base font-medium flex-1"
+              onClick={() => {
+                if (isDemoMode) {
+                  toast("Cannot delete records in demo mode")
+                  return
+                }
+                setDeleteOneId(selectedRecord!.id)
+                setSelectedRecord(null)
+              }}
+              disabled={isDemoMode}
+            >
+              <Trash2 className="mr-1 h-4 w-4" /> Delete
+            </Button>
+          </DrawerFooter>
+        </DrawerContent>
+      </Drawer>
+
+      {/* Edit Record Modal */}
+      {editingRecord && (
+        <EditRecordModal
+          record={editingRecord}
+          onClose={() => setEditingRecord(null)}
+          onSave={(updates) => {
+            updateRecord(editingRecord.id, updates)
+            syncToDrive('updateRecord', { ...editingRecord, ...updates } as ReliefRecord)
+            syncRecordUpdateToSupabase(editingRecord.id, updates)
+            setEditingRecord(null)
+            setSelectedRecord(null)
+            toast.success("Record updated!")
+          }}
+          onDelete={() => {
+            setDeleteOneId(editingRecord.id)
+            setEditingRecord(null)
+          }}
+        />
+      )}
+
+      {/* Fullscreen Image Preview */}
+      {previewImage && (
+        <div
+          className="fixed inset-0 z-[99999] bg-black/90 flex items-center justify-center p-4"
+          onClick={() => setPreviewImage(null)}
+        >
+          <img
+            src={previewImage}
+            alt="Fullscreen preview"
+            className="max-w-full max-h-full object-contain"
+          />
+          <button
+            onClick={() => setPreviewImage(null)}
+            className="absolute top-4 right-4 text-white text-2xl hover:text-gray-300"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ADD RECURRING TEMPLATE FORM
+// Hoisted for the same reason as RecordsTab above: SettingsTab is still an
+// inline closure inside ReliefTrackApp, so anything that updates state
+// living in ReliefTrackApp's scope re-renders it and remounts SettingsTab's
+// entire subtree. Keeping this form's fields as component-local state (never
+// touching ReliefTrackApp until the final "Save Template" click) means
+// typing here doesn't trigger that at all — confirmed broken before this fix
+// (typing "Netflix Subscription" only registered the first letter).
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface AddRecurringTemplateFormProps {
+  onCancel: () => void
+  onSave: (template: Omit<RecurringTemplate, 'id'>) => void
+}
+
+function AddRecurringTemplateForm({ onCancel, onSave }: AddRecurringTemplateFormProps) {
+  const [merchant, setMerchant] = useState('')
+  const [amount, setAmount] = useState('')
+  const [category, setCategory] = useState('lifestyle')
+  const [dayOfMonth, setDayOfMonth] = useState(1)
+
+  return (
+    <div className="space-y-3 rounded-xl border bg-muted/30 p-4">
+      <p className="text-sm font-medium">New Recurring Expense</p>
+      <div className="space-y-2">
+        <Input
+          placeholder="Merchant (e.g. Netflix, Gym)"
+          value={merchant}
+          onChange={(e) => setMerchant(e.target.value)}
+          className="h-10"
+        />
+        <div className="flex gap-2">
+          <Input
+            type="number"
+            placeholder="Amount (RM)"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            className="h-10 flex-1"
+          />
+          <Select
+            value={String(dayOfMonth)}
+            onValueChange={(v) => setDayOfMonth(parseInt(v))}
+          >
+            <SelectTrigger className="h-10 w-24">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+                <SelectItem key={d} value={String(d)}>Day {d}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <Select value={category} onValueChange={setCategory}>
+          <SelectTrigger className="h-10">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {RELIEF_CATEGORIES.map((cat) => (
+              <SelectItem key={cat.id} value={cat.id}>{cat.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="flex gap-2">
+        <Button variant="outline" className="flex-1 h-10" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button
+          className="flex-1 h-10"
+          disabled={!merchant.trim() || !amount}
+          onClick={() => {
+            onSave({
+              merchant: merchant.trim(),
+              amount: parseFloat(amount) || 0,
+              category,
+              dayOfMonth,
+              description: '',
+              active: true,
+            })
+          }}
+        >
+          Save Template
+        </Button>
+      </div>
+    </div>
+  )
 }
 
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
@@ -1020,20 +1613,6 @@ useEffect(() => {
   const [ocrResult, setOcrResult] = useState<OcrResult | null>(null)
   const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null)
   const [isVerifying, setIsVerifying] = useState(false)
-  const [searchQuery, setSearchQuery] = useState("")
-  const [filterCategory, setFilterCategory] = useState("all")
-  const [recordsView, setRecordsView] = useState<"list" | "chart">("list")
-  const [selectedRecord, setSelectedRecord] = useState<ReliefRecord | null>(null)
-  const [editingRecord, setEditingRecord] = useState<ReliefRecord | null>(null)
-  const [previewImage, setPreviewImage] = useState<string | null>(null) // fullscreen image preview
-
-  // Fix 1: Clear image preview when leaving Records tab
-  useEffect(() => {
-    if (activeTab !== 'records') {
-      setPreviewImage(null)
-    }
-  }, [activeTab])
-  const [isRefreshing, setIsRefreshing] = useState(false)
   const [mounted, setMounted] = useState(false)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [deleteOneId, setDeleteOneId] = useState<string | null>(null)
@@ -1093,9 +1672,6 @@ useEffect(() => {
 
   // ── Recurring Templates UI state ──────────────────────────────────────────
   const [showAddTemplate, setShowAddTemplate] = useState(false)
-  const [newTemplate, setNewTemplate] = useState({
-    merchant: '', amount: '', category: 'lifestyle', dayOfMonth: 1, description: '',
-  })
 
   // ── Natural-language quick capture ───────────────────────────────────────
   const [nlpInput, setNlpInput] = useState('')
@@ -1162,26 +1738,6 @@ useEffect(() => {
   // ── Computed ────────────────────────────────────────────────────────────
   const reliefTotals = getReliefTotals()
   const applicableReliefs = getApplicableReliefs()
-  // Distinct colors per category (day + dark mode safe)
-  const colorMap: Record<string, { light: string; dark: string; hex: string }> = {
-    emerald:  { light: 'text-emerald-600',    dark: 'dark:text-emerald-400',    hex: '#059669' },
-    blue:     { light: 'text-blue-600',        dark: 'dark:text-blue-400',        hex: '#2563eb' },
-    rose:     { light: 'text-rose-600',        dark: 'dark:text-rose-400',        hex: '#e11d48' },
-    violet:   { light: 'text-violet-600',     dark: 'dark:text-violet-400',     hex: '#7c3aed' },
-    orange:   { light: 'text-orange-600',      dark: 'dark:text-orange-400',      hex: '#ea580c' },
-    pink:     { light: 'text-pink-600',       dark: 'dark:text-pink-400',       hex: '#db2777' },
-    cyan:     { light: 'text-cyan-600',        dark: 'dark:text-cyan-400',        hex: '#0891b2' },
-    teal:     { light: 'text-teal-600',        dark: 'dark:text-teal-400',        hex: '#0d9488' },
-    amber:    { light: 'text-amber-600',       dark: 'dark:text-amber-400',       hex: '#d97706' },
-    red:      { light: 'text-red-600',         dark: 'dark:text-red-400',         hex: '#dc2626' },
-    indigo:   { light: 'text-indigo-600',     dark: 'dark:text-indigo-400',     hex: '#4f46e5' },
-    sky:      { light: 'text-sky-600',         dark: 'dark:text-sky-400',         hex: '#0284c7' },
-  }
-  const getColor = (colorId?: string) => colorMap[colorId || 'blue'] || colorMap['blue']
-  const getCategoryColor = (categoryId: string) => {
-    const cat = RELIEF_CATEGORIES.find((c) => c.id === categoryId)
-    return getColor(cat?.color)
-  }
   const totalClaimed = getTotalClaimed()
   const totalPossible = getTotalPossible()
   const estimatedSavings = getEstimatedTaxSavings()
@@ -1203,53 +1759,8 @@ useEffect(() => {
   // subcategory breakdown displays that need every record in the selected
   // YA, not just what's currently visible in the Records tab's search box.
   const yearScopedRecords = displayRecords.filter((r) => new Date(r.date).getFullYear() === selectedYear)
-  const filteredRecords = displayRecords.filter((r) => {
-    const recordYear = new Date(r.date).getFullYear()
-    const matchYear = recordYear === selectedYear
-    const matchSearch =
-      r.merchant.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (r.description ?? '').toLowerCase().includes(searchQuery.toLowerCase())
-    const matchCat = filterCategory === "all" || r.category === filterCategory
-    return matchYear && matchSearch && matchCat
-  })
-
-  // Chart data
-  const pieData = applicableReliefs.slice(0, 6).map((cat, i) => ({
-    name: cat.name.split(" ")[0],
-    value: reliefTotals[cat.id] || 0,
-    color: ["#059669", "#0d9488", "#0284c7", "#7c3aed", "#db2777", "#d97706"][
-      i
-    ],
-  })).filter((d) => d.value > 0)
-
-  const monthlyData = (() => {
-    const months: Record<string, number> = {}
-    displayRecords.forEach((r) => {
-      const m = r.date.slice(0, 7) // YYYY-MM
-      months[m] = (months[m] || 0) + r.amount
-    })
-    const sorted = Object.entries(months).sort()
-    const monthNames = [
-      "Jan",
-      "Feb",
-      "Mar",
-      "Apr",
-      "May",
-      "Jun",
-      "Jul",
-      "Aug",
-      "Sep",
-      "Oct",
-      "Nov",
-      "Dec",
-    ]
-    return sorted
-      .slice(-6)
-      .map(([m, val]) => ({
-        month: monthNames[parseInt(m.split("-")[1]) - 1] || m,
-        amount: val,
-      }))
-  })()
+  // (search/category filtering and chart data now live inside RecordsTab
+  // itself — see the hoisted RecordsTab component above)
 
   // ── File Upload Handler (real OCR) ─────────────────────────────────────
   const handleFileUpload = async (file: File) => {
@@ -1812,13 +2323,6 @@ useEffect(() => {
     }
   }
 
-  // ── Refresh ─────────────────────────────────────────────────────────────
-  const handleRefresh = () => {
-    setIsRefreshing(true)
-    toast.info("Data refreshed from local storage.")
-    setTimeout(() => setIsRefreshing(false), 800)
-  }
-
   // ── Profile Save ────────────────────────────────────────────────────────
   // ── Google Drive Mock ──────────────────────────────────────────────────
   const handleConnectDrive = async () => {
@@ -1982,8 +2486,6 @@ useEffect(() => {
       deleteRecord(deleteOneId)
       syncToDrive('deleteRecord', undefined, deleteOneId)
       syncRecordDeleteToSupabase(deleteOneId)
-      setSelectedRecord(null)
-      setEditingRecord(null)
       setDeleteOneId(null)
       toast.success("Record deleted.")
     }
@@ -2773,386 +3275,6 @@ useEffect(() => {
       </ScrollArea>
     )
   }
-
-  // ═══════════════════════════════════════════════════════════════════════
-  // RECORDS TAB
-  // ═══════════════════════════════════════════════════════════════════════
-  const RecordsTab = () => (
-    <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
-      {/* Search and Filter */}
-      <div className="space-y-3 border-b border-border bg-background p-4">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            placeholder={t('searchRecords')}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-9"
-          />
-        </div>
-        <div className="flex items-center gap-2">
-          <Select value={filterCategory} onValueChange={setFilterCategory}>
-            <SelectTrigger className="h-9 w-[140px]">
-              <Filter className="mr-2 h-3 w-3" />
-              <SelectValue placeholder="Category" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Categories</SelectItem>
-              {RELIEF_CATEGORIES.map((cat) => (
-                <SelectItem key={cat.id} value={cat.id}>
-                  {cat.name.split(" ")[0]}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <div className="flex rounded-lg border border-input bg-background p-1">
-            <Button
-              variant={recordsView === "list" ? "secondary" : "ghost"}
-              size="sm"
-              className="h-7 px-2"
-              onClick={() => setRecordsView("list")}
-            >
-              <FileText className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              variant={recordsView === "chart" ? "secondary" : "ghost"}
-              size="sm"
-              className="h-7 px-2"
-              onClick={() => setRecordsView("chart")}
-            >
-              <PieChart className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="ml-auto h-9"
-            onClick={handleRefresh}
-            disabled={isRefreshing}
-          >
-            <RefreshCw
-              className={cn("h-4 w-4", isRefreshing && "animate-spin")}
-            />
-          </Button>
-        </div>
-      </div>
-
-      {/* Records List or Chart */}
-      <ScrollArea className="flex-1">
-          {recordsView === "list" ? (
-            <div className="overflow-hidden divide-y divide-border">
-            {filteredRecords.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-16 text-center">
-                <FileText className="h-12 w-12 text-muted-foreground/50" />
-                <p className="mt-3  text-muted-foreground">
-                  No records for YA {settings.defaultTaxYear}
-                </p>
-                <p className=" text-muted-foreground">
-                  Add your first receipt to get started
-                </p>
-              </div>
-            ) : (
-              filteredRecords.map((record) => {
-                const Icon = getCategoryIcon(record.category)
-                return (
-                  <button
-                    key={record.id}
-                    className="flex w-full items-center gap-3 p-4 text-left transition-colors hover:bg-muted/50 overflow-hidden"
-                    onClick={() => setSelectedRecord(record)}
-                  >
-                    <div className="flex items-center gap-3 flex-1 min-w-0 overflow-hidden">
-                      {/* Icon with receipt dot */}
-                      <div className="relative shrink-0">
-                        <div
-                          className="flex h-10 w-10 items-center justify-center rounded-full"
-                          style={{ backgroundColor: getCategoryColor(record.category).hex + '1a' }}
-                        >
-                          <Icon className="h-5 w-5" style={{ color: getCategoryColor(record.category).hex }} />
-                        </div>
-                        {record.receiptUrl && (
-                          <div className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-emerald-500 border-2 border-background" title="Has receipt" />
-                        )}
-                      </div>
-
-                      {/* Description + Merchant stacked vertically */}
-                      <div className="flex-1 min-w-0 overflow-hidden">
-                        {/* Description — rolling if long */}
-                        <div className={cn("overflow-hidden", (record.description?.length ?? 0) > 30 && "marquee-wrapper")}>
-                          <p
-                            className={cn(
-                              "text-sm font-medium",
-                              (record.description?.length ?? 0) > 30
-                                ? "marquee-text whitespace-nowrap"
-                                : "truncate whitespace-nowrap"
-                            )}
-                            title={record.description}
-                          >
-                            {record.description}
-                          </p>
-                        </div>
-                        {/* Merchant — rolling if long */}
-                        <div className={cn("overflow-hidden", record.merchant?.length > 25 && "marquee-wrapper")}>
-                          <p
-                            className={cn(
-                              "text-xs text-muted-foreground",
-                              record.merchant?.length > 25
-                                ? "marquee-text whitespace-nowrap"
-                                : "truncate whitespace-nowrap"
-                            )}
-                            title={record.merchant}
-                          >
-                            {record.merchant}
-                          </p>
-                        </div>
-                      </div>
-
-                      {/* Amount + Verified + Evidence + Sync */}
-                      <div className="flex items-center gap-2 shrink-0 min-w-0">
-                        <span className="text-sm font-semibold whitespace-nowrap">{formatRM(record.amount)}</span>
-                        {record.status === 'verified' ? (
-                          <BadgeCheck className="h-3.5 w-3.5 text-emerald-500 shrink-0" aria-label="Verified" />
-                        ) : (
-                          <Clock className="h-3.5 w-3.5 text-amber-500 shrink-0" aria-label="Pending review" />
-                        )}
-                        {record.receiptUrl ? (
-                          <Shield className="h-3 w-3 text-emerald-500 shrink-0" aria-label="Receipt attached — audit ready" />
-                        ) : record.category !== 'individual' ? (
-                          <AlertCircle className="h-3 w-3 text-red-400 shrink-0" aria-label="No receipt — not audit ready" />
-                        ) : null}
-                        {record.syncedToDrive ? (
-                          <Cloud className="h-3 w-3 text-sky-500 shrink-0" aria-label="Synced to Google Drive" />
-                        ) : (
-                          <RefreshCw className="h-3 w-3 text-amber-500 shrink-0 animate-spin" aria-label="Pending sync" />
-                        )}
-                      </div>
-                    </div>
-                  </button>
-                )
-              })
-            )}
-          </div>
-        ) : (
-          <div className="space-y-4 p-4">
-            {/* Recharts Pie */}
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-base">
-                  Relief Breakdown by Category
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                {pieData.length > 0 ? (
-                  <div className="flex items-center justify-center gap-4">
-                    <ResponsiveContainer width="100%" height={160}>
-                      <RechartsPieChart>
-                        <Pie
-                          data={pieData}
-                          cx="50%"
-                          cy="50%"
-                          innerRadius={45}
-                          outerRadius={70}
-                          dataKey="value"
-                          paddingAngle={2}
-                        >
-                          {pieData.map((entry, i) => (
-                            <Cell key={i} fill={entry.color} />
-                          ))}
-                        </Pie>
-                        <Tooltip formatter={(v: number) => formatRM(v)} />
-                      </RechartsPieChart>
-                    </ResponsiveContainer>
-                    <div className="flex flex-col gap-2">
-                      {pieData.map((d) => (
-                        <div key={d.name} className="flex items-center gap-2">
-                          <div
-                            className="h-2.5 w-2.5 rounded-full"
-                            style={{ backgroundColor: d.color }}
-                          />
-                          <span className=" text-muted-foreground">
-                            {d.name}
-                          </span>
-                          <span className=" font-medium">
-                            {formatRM(d.value)}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex h-40 items-center justify-center  text-muted-foreground">
-                    No data to display
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Monthly Bar Chart */}
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-base">Monthly Spending</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {monthlyData.length > 0 ? (
-                  <ResponsiveContainer width="100%" height={140}>
-                    <BarChart
-                      data={monthlyData}
-                      margin={{ top: 5, right: 10, left: -20, bottom: 0 }}
-                    >
-                      <XAxis dataKey="month" tick={{ fontSize: 11 }} />
-                      <YAxis
-                        tick={{ fontSize: 11 }}
-                        tickFormatter={(v) => `RM${(v / 1000).toFixed(0)}k`}
-                      />
-                      <Tooltip formatter={(v: number) => formatRM(v)} />
-                      <Bar
-                        dataKey="amount"
-                        fill="var(--primary)"
-                        radius={[4, 4, 0, 0]}
-                      />
-                    </BarChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="flex h-32 items-center justify-center  text-muted-foreground">
-                    No monthly data
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-        )}
-      </ScrollArea>
-
-      {/* Record Detail Modal */}
-      <Drawer
-        open={!!selectedRecord}
-        onOpenChange={(o) => !o && setSelectedRecord(null)}
-      >
-        <DrawerContent className="max-h-[90vh] flex flex-col">
-          <DrawerHeader className="text-left">
-            <DrawerTitle>Record Details</DrawerTitle>
-          </DrawerHeader>
-          <div className="flex-1 overflow-y-auto px-4">
-            {selectedRecord && (
-              <div className="space-y-4 pb-4">
-                {/* Receipt preview */}
-                <div className="aspect-video overflow-hidden rounded-lg bg-muted">
-                  {selectedRecord.receiptUrl ? (
-                    <img
-                      src={selectedRecord.receiptUrl}
-                      alt="Receipt"
-                      className="h-full w-full object-contain cursor-pointer hover:opacity-90"
-                      onClick={() => setPreviewImage(selectedRecord.receiptUrl!)}
-                    />
-                  ) : (
-                    <div className="flex h-full items-center justify-center">
-                      <div className="text-center">
-                        <FileText className="mx-auto h-12 w-12 text-muted-foreground" />
-                        <p className="mt-2  text-muted-foreground">
-                          No receipt attached
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-                <div className="space-y-2">
-                  {[
-                    [
-                      "Category",
-                      RELIEF_CATEGORIES.find((c) => c.id === selectedRecord.category)?.name,
-                    ],
-                    ["Date", selectedRecord.date],
-                    ["Amount", formatRM(selectedRecord.amount)],
-                    ["Merchant", selectedRecord.merchant],
-                    ["Description", selectedRecord.description],
-                    ["Status", selectedRecord.status],
-                  ].map(([label, value], i) => (
-                    <div key={i}>
-                      <div className="flex justify-between py-1.5">
-                        <span className=" text-muted-foreground">
-                          {label}
-                        </span>
-                        <span className=" font-medium text-foreground">
-                          {value}
-                        </span>
-                      </div>
-                      {i < 5 && <Separator />}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-          <DrawerFooter className="shrink-0 flex gap-2">
-            <Button
-              variant="outline"
-              className="h-12 text-base font-medium flex-1"
-              onClick={() => {
-                if (isDemoMode) {
-                  toast("Cannot edit records in demo mode")
-                  return
-                }
-                setSelectedRecord(null)
-                setEditingRecord(selectedRecord)
-              }}
-            >
-              <Edit2 className="mr-1 h-4 w-4" /> Edit
-            </Button>
-            <Button
-              variant="destructive"
-              className="h-12 text-base font-medium flex-1"
-              onClick={() => {
-                if (isDemoMode) {
-                  toast("Cannot delete records in demo mode")
-                  return
-                }
-                setDeleteOneId(selectedRecord!.id)
-              }}
-              disabled={isDemoMode}
-            >
-              <Trash2 className="mr-1 h-4 w-4" /> Delete
-            </Button>
-          </DrawerFooter>
-        </DrawerContent>
-      </Drawer>
-
-      {/* Edit Record Modal */}
-      {editingRecord && (
-        <EditRecordModal
-          record={editingRecord}
-          onClose={() => setEditingRecord(null)}
-          onSave={(updates) => {
-            updateRecord(editingRecord.id, updates)
-            syncToDrive('updateRecord', { ...editingRecord, ...updates } as ReliefRecord)
-            syncRecordUpdateToSupabase(editingRecord.id, updates)
-            setEditingRecord(null)
-            setSelectedRecord(null)
-            toast.success("Record updated!")
-          }}
-          onDelete={() => { setDeleteOneId(editingRecord.id) }}
-        />
-      )}
-
-      {/* Fullscreen Image Preview */}
-      {previewImage && (
-        <div
-          className="fixed inset-0 z-[99999] bg-black/90 flex items-center justify-center p-4"
-          onClick={() => setPreviewImage(null)}
-        >
-          <img
-            src={previewImage}
-            alt="Fullscreen preview"
-            className="max-w-full max-h-full object-contain"
-          />
-          <button
-            onClick={() => setPreviewImage(null)}
-            className="absolute top-4 right-4 text-white text-2xl hover:text-gray-300"
-          >
-            ✕
-          </button>
-        </div>
-      )}
-    </div>
-  )
 
   // ═══════════════════════════════════════════════════════════════════════
   // PROFILE TAB
@@ -3948,80 +4070,14 @@ useEffect(() => {
               )}
 
               {showAddTemplate && (
-                <div className="space-y-3 rounded-xl border bg-muted/30 p-4">
-                  <p className="text-sm font-medium">New Recurring Expense</p>
-                  <div className="space-y-2">
-                    <Input
-                      placeholder="Merchant (e.g. Netflix, Gym)"
-                      value={newTemplate.merchant}
-                      onChange={(e) => setNewTemplate({ ...newTemplate, merchant: e.target.value })}
-                      className="h-10"
-                    />
-                    <div className="flex gap-2">
-                      <Input
-                        type="number"
-                        placeholder="Amount (RM)"
-                        value={newTemplate.amount}
-                        onChange={(e) => setNewTemplate({ ...newTemplate, amount: e.target.value })}
-                        className="h-10 flex-1"
-                      />
-                      <Select
-                        value={String(newTemplate.dayOfMonth)}
-                        onValueChange={(v) => setNewTemplate({ ...newTemplate, dayOfMonth: parseInt(v) })}
-                      >
-                        <SelectTrigger className="h-10 w-24">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
-                            <SelectItem key={d} value={String(d)}>Day {d}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <Select
-                      value={newTemplate.category}
-                      onValueChange={(v) => setNewTemplate({ ...newTemplate, category: v })}
-                    >
-                      <SelectTrigger className="h-10">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {RELIEF_CATEGORIES.map((cat) => (
-                          <SelectItem key={cat.id} value={cat.id}>{cat.name}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      className="flex-1 h-10"
-                      onClick={() => { setShowAddTemplate(false); setNewTemplate({ merchant: '', amount: '', category: 'lifestyle', dayOfMonth: 1, description: '' }) }}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      className="flex-1 h-10"
-                      disabled={!newTemplate.merchant.trim() || !newTemplate.amount}
-                      onClick={() => {
-                        addTemplate({
-                          merchant: newTemplate.merchant.trim(),
-                          amount: parseFloat(newTemplate.amount) || 0,
-                          category: newTemplate.category,
-                          dayOfMonth: newTemplate.dayOfMonth,
-                          description: newTemplate.description,
-                          active: true,
-                        })
-                        setShowAddTemplate(false)
-                        setNewTemplate({ merchant: '', amount: '', category: 'lifestyle', dayOfMonth: 1, description: '' })
-                        toast("Recurring expense added")
-                      }}
-                    >
-                      Save Template
-                    </Button>
-                  </div>
-                </div>
+                <AddRecurringTemplateForm
+                  onCancel={() => setShowAddTemplate(false)}
+                  onSave={(template) => {
+                    addTemplate(template)
+                    setShowAddTemplate(false)
+                    toast("Recurring expense added")
+                  }}
+                />
               )}
             </CardContent>
           </Card>
@@ -4089,7 +4145,21 @@ useEffect(() => {
       {/* Main Content */}
       <main className="flex-1 pt-2 pb-[env(safe-area-inset-bottom)] w-full overflow-y-auto overscroll-contain">
         {activeTab === "dashboard" && <DashboardTab />}
-        {activeTab === "records" && <RecordsTab />}
+        {activeTab === "records" && (
+          <RecordsTab
+            t={t}
+            displayRecords={displayRecords}
+            selectedYear={selectedYear}
+            defaultTaxYear={settings.defaultTaxYear}
+            applicableReliefs={applicableReliefs}
+            reliefTotals={reliefTotals}
+            isDemoMode={isDemoMode}
+            updateRecord={updateRecord}
+            syncToDrive={syncToDrive}
+            syncRecordUpdateToSupabase={syncRecordUpdateToSupabase}
+            setDeleteOneId={setDeleteOneId}
+          />
+        )}
         {activeTab === "profile" && <ProfileTab />}
         {activeTab === "settings" && <SettingsTab />}
       </main>
