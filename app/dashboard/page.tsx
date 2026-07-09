@@ -1609,6 +1609,8 @@ useEffect(() => {
     confidence: number
     rawText: string
     category: string
+    subCategory?: string
+    claimable?: boolean
   } | null>(null)
   const [ocrResult, setOcrResult] = useState<OcrResult | null>(null)
   const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null)
@@ -1781,28 +1783,52 @@ useEffect(() => {
       setOcrResult(result)
       setIsVerifying(false)
       setVerifyResult(null)
+      const category = result.category || 'lifestyle'
+      const categoryDef = RELIEF_CATEGORIES.find((c) => c.id === category)
+      const hasSubcategories = !!categoryDef?.subcategories && categoryDef.subcategories.length > 0
+      const subCategory = hasSubcategories && result.sub_category ? result.sub_category : ''
       const reviewPayload = {
         vendor: result.vendor || '',
-        amount: result.amount ? String(Math.round(result.amount)) : '',
+        // toFixed keeps sen (RM130.45 was previously rounded to RM130 here)
+        amount: result.amount ? result.amount.toFixed(2) : '',
         date: result.date || `${settings.defaultTaxYear}-${new Date().toISOString().slice(5, 10)}`,
-        description: '',
+        description: result.description || '',
         invoiceNumber: result.invoice_number || '',
         confidence: result.confidence,
         rawText: result.raw_text,
-        category: result.category || 'lifestyle',
+        category,
+        subCategory,
+        claimable: result.claimable,
       }
-      // High-confidence auto-save: skip review screen if ≥0.85 (0–1 scale) and data is complete
-      if (result.confidence >= 0.85 && reviewPayload.vendor && reviewPayload.amount) {
-        addRecord({
+      // High-confidence auto-save: skip review screen only when confidence is
+      // genuinely high, required fields are present, the LLM classifier (if
+      // it ran) judged this expense claimable, and — if the category has
+      // subcategories — a subcategory was actually determined. Any of those
+      // failing routes to the review screen instead of silently mis-filing
+      // the record (e.g. a non-deductible purchase auto-saved as "verified").
+      const autoSaveEligible =
+        result.confidence >= 0.85 &&
+        reviewPayload.vendor &&
+        reviewPayload.amount &&
+        result.claimable !== false &&
+        (!hasSubcategories || !!subCategory)
+      if (autoSaveEligible) {
+        const autoSavePayload = {
           category: reviewPayload.category,
           date: reviewPayload.date,
           amount: parseFloat(reviewPayload.amount),
           merchant: reviewPayload.vendor,
-          status: 'verified',
+          description: reviewPayload.description || undefined,
+          status: 'verified' as const,
           receiptUrl: receiptPreview || undefined,
           receiptFileName: uploadedFileName || undefined,
           invoiceNumber: reviewPayload.invoiceNumber || undefined,
-        })
+          lhdNCategory: subCategory || undefined,
+        }
+        const newId = addRecord(autoSavePayload)
+        learnMerchant(reviewPayload.vendor, reviewPayload.category)
+        syncToDrive('saveRecord', { ...autoSavePayload, id: newId } as ReliefRecord)
+        syncNewRecordToSupabase(newId, autoSavePayload)
         toast.success("Saved — tap to review", {
           description: `${reviewPayload.vendor} · RM ${reviewPayload.amount}`,
           duration: 3000,
@@ -2047,15 +2073,19 @@ useEffect(() => {
   const handleSaveFromReview = () => {
     if (!reviewData) return
     if (!reviewData.vendor.trim() || !reviewData.amount) return
+    const reviewCatDef = RELIEF_CATEGORIES.find(c => c.id === reviewData.category)
+    if (reviewCatDef?.subcategories?.length && !reviewData.subCategory) return
     const recPayload = {
       category: reviewData.category,
       date: reviewData.date,
       amount: parseFloat(reviewData.amount),
       merchant: reviewData.vendor,
+      description: reviewData.description || undefined,
       status: 'verified' as const,
       receiptUrl: receiptPreview || undefined,
       receiptFileName: uploadedFileName || undefined,
       invoiceNumber: reviewData.invoiceNumber || undefined,
+      lhdNCategory: reviewData.subCategory || undefined,
     }
 
     // Duplicate detection
@@ -2070,6 +2100,7 @@ useEffect(() => {
           const newId = addRecord(recPayload)
           learnMerchant(recPayload.merchant, recPayload.category)
           toast.success("Record added successfully!")
+          syncToDrive('saveRecord', { ...recPayload, id: newId } as ReliefRecord)
           syncNewRecordToSupabase(newId, recPayload)
           closeAddDrawer()
         },
@@ -2083,6 +2114,7 @@ useEffect(() => {
     if (!settings.googleDriveConnected && !settings.supabaseUserId) {
       setTimeout(() => toast("Connect Google Drive in Settings to back up your records."), 1200)
     }
+    syncToDrive('saveRecord', { ...recPayload, id: newId } as ReliefRecord)
     syncNewRecordToSupabase(newId, recPayload)
     closeAddDrawer()
   }
@@ -4256,7 +4288,7 @@ useEffect(() => {
               <div className="flex items-center justify-between">
                 <Select
                   value={reviewData.category}
-                  onValueChange={(v) => setReviewData({ ...reviewData, category: v })}
+                  onValueChange={(v) => setReviewData({ ...reviewData, category: v, subCategory: "" })}
                 >
                   <SelectTrigger className="h-8 w-auto gap-1.5 border-emerald-200 bg-emerald-50 px-2.5 text-xs text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
                     <Tag className="h-3 w-3 shrink-0" />
@@ -4273,6 +4305,47 @@ useEffect(() => {
                 </span>
               </div>
 
+              {/* Subcategory (categories with sub-items need one for the sub-cap to be enforced) */}
+              {RELIEF_CATEGORIES.find(c => c.id === reviewData.category)?.subcategories && RELIEF_CATEGORIES.find(c => c.id === reviewData.category)!.subcategories!.length > 0 && (
+                <div className="space-y-1.5">
+                  <Label className="text-sm font-medium">Subcategory</Label>
+                  <Select
+                    value={reviewData.subCategory || ""}
+                    onValueChange={(v) => setReviewData({ ...reviewData, subCategory: v })}
+                  >
+                    <SelectTrigger className={!reviewData.subCategory ? 'h-11 border-2 border-amber-400' : 'h-11'}>
+                      <SelectValue placeholder="Select subcategory" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {RELIEF_CATEGORIES.find(c => c.id === reviewData.category)!.subcategories!.map((sub) => (
+                        <SelectItem key={sub.id} value={sub.id}>
+                          {sub.name}{sub.maxLimit > 0 ? ` (Max RM ${sub.maxLimit.toLocaleString()})` : ''}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
+              {/* Description */}
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">Description</Label>
+                <Input
+                  value={reviewData.description}
+                  onChange={(e) => setReviewData({ ...reviewData, description: e.target.value })}
+                  className="h-11"
+                  placeholder="What was this for?"
+                />
+              </div>
+
+              {/* Not-claimable warning */}
+              {reviewData.claimable === false && (
+                <div className="flex items-center gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-600 dark:bg-amber-950/30 dark:text-amber-400">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>This doesn't look like a tax-deductible expense — double-check the category before saving.</span>
+                </div>
+              )}
+
               {/* Validation warning */}
               {(!reviewData.vendor.trim() || !reviewData.amount) && (
                 <div className="flex items-center gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-600 dark:bg-amber-950/30 dark:text-amber-400">
@@ -4280,12 +4353,24 @@ useEffect(() => {
                   <span>Merchant and amount are required</span>
                 </div>
               )}
+              {reviewData.vendor.trim() && reviewData.amount &&
+                !!RELIEF_CATEGORIES.find(c => c.id === reviewData.category)?.subcategories?.length &&
+                !reviewData.subCategory && (
+                <div className="flex items-center gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-600 dark:bg-amber-950/30 dark:text-amber-400">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>Select a subcategory to continue</span>
+                </div>
+              )}
 
               {/* Action buttons */}
               <Button
                 className="h-12 w-full text-base font-semibold"
                 onClick={handleSaveFromReview}
-                disabled={!reviewData.vendor.trim() || !reviewData.amount}
+                disabled={
+                  !reviewData.vendor.trim() ||
+                  !reviewData.amount ||
+                  (!!RELIEF_CATEGORIES.find(c => c.id === reviewData.category)?.subcategories?.length && !reviewData.subCategory)
+                }
               >
                 Save Record
               </Button>
@@ -4300,6 +4385,8 @@ useEffect(() => {
                     date: reviewData.date,
                     invoiceNumber: reviewData.invoiceNumber,
                     category: reviewData.category,
+                    lhdNCategory: reviewData.subCategory || "",
+                    description: reviewData.description,
                   }))
                   setShowOcrReview(false)
                   setShowOCRForm(true)
