@@ -53,6 +53,12 @@ export interface OcrResult {
   extraction_method: OcrExtractionMethod
   needs_review: boolean
   document_type: OcrDocumentType
+  /** LHDN relief subcategory id (e.g. 'medical_dental'), when the LLM classifier is confident enough to suggest one. */
+  sub_category?: string | null
+  /** false when the LLM classifier determined this expense doesn't qualify for any relief category (e.g. groceries, fuel). Absent when classification wasn't attempted. */
+  claimable?: boolean
+  /** Short line-item description (e.g. "Dental scaling, full mouth"), when available. */
+  description?: string | null
 }
 
 /**

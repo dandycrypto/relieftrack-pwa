@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/api-auth'
 import { isRateLimited, getClientIp } from '@/lib/rate-limit'
+import { callMiniMax as callMiniMaxShared } from '@/lib/minimax'
 
 export const runtime = 'nodejs'
 export const maxDuration = 30
@@ -151,59 +152,11 @@ Reply ONLY with valid JSON, no markdown: {"date":"YYYY-MM-DD","merchant":"...","
 Category hints: dental/medical/clinic → medical_self; mum/parents → parents_medical; books/laptop/internet/sports → lifestyle; insurance/EPF → epf_insurance; university/course → education_self; children → children_under18.`
 
 // ─── MiniMax API Call ────────────────────────────────────────────────────────
+// Shared client lives in lib/minimax.ts (also used by /api/ocr's LLM field
+// extraction) — this wrapper just adapts this route's ChatMessage[] shape.
 
-async function callMiniMax(
-  system: string,
-  messages: ChatMessage[],
-  model?: string
-): Promise<string> {
-  const apiKey = process.env.MINIMAX_API_KEY
-  const baseUrl = process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1'
-
-  if (!apiKey || apiKey === '***') {
-    throw new Error('MINIMAX_API_KEY not configured')
-  }
-
-  // Try env-configured model first; fall back to known MiniMax model ids
-  const candidates = [model ?? process.env.MINIMAX_MODEL, 'MiniMax-Text-01', 'abab7-chat'].filter(Boolean) as string[]
-
-  const url = `${baseUrl}/chat/completions`
-  let lastErr = ''
-  for (const candidate of candidates) {
-    const body: Record<string, unknown> = {
-      model: candidate,
-    messages: [
-      { role: 'system', content: system },
-      ...messages.map((m) => ({ role: m.role, content: m.content })),
-    ],
-    max_tokens: 1024,
-    temperature: 0.7,
-  }
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  })
-
-    if (res.ok) {
-      const data = await res.json()
-      const reply = data?.choices?.[0]?.message?.content
-      if (reply) {
-        if (candidate !== (model ?? process.env.MINIMAX_MODEL)) {
-          console.log(`[ai-chat] fell back to model ${candidate}`)
-        }
-        return reply
-      }
-    }
-    lastErr = `${res.status}: ${await res.text()}`
-    // unknown model → try next candidate; otherwise break
-    if (!lastErr.includes('unknown model') && !lastErr.includes('2013')) break
-  }
-  throw new Error(`MiniMax API error ${lastErr}`)
+async function callMiniMax(system: string, messages: ChatMessage[], model?: string): Promise<string> {
+  return callMiniMaxShared(system, messages, { model })
 }
 
 // ─── Route Handler ────────────────────────────────────────────────────────────
