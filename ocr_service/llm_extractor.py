@@ -167,12 +167,60 @@ def _parse_json(text: str) -> Optional[dict]:
     return None
 
 
+
+# --- OpenAI-compatible relay (primary) ----------------------------------
+
+def call_relay(raw_text: str, model: str = None):
+    """Call an OpenAI-compatible relay (e.g. opencode zen).
+
+    This is the only cloud provider actually configured on this host, and it is
+    tried before the local Ollama path. Ollama here serves a 3GB gemma model on
+    a 2-core CPU box and takes roughly 90 seconds per call, which exceeds the
+    OCR request budget -- a fallback list that starts with Ollama therefore
+    never completes in practice.
+    """
+    base = os.environ.get("LLM_BASE_URL")
+    key = os.environ.get("LLM_API_KEY")
+    if not base or not key:
+        return None
+    model = model or os.environ.get("LLM_MODEL", "deepseek-v4.1-flash")
+    try:
+        import requests
+        prompt = LLM_PROMPT + raw_text
+        t0 = time.time()
+        r = requests.post(
+            base.rstrip("/") + "/chat/completions",
+            headers={
+                "Authorization": "Bearer " + key,
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.0,
+                "max_tokens": 600,
+            },
+            timeout=25,
+        )
+        elapsed = time.time() - t0
+        logger.info("Relay %s: %s in %.2fs", model, r.status_code, elapsed)
+        if not r.ok:
+            logger.warning("Relay failed body: %s", r.text[:200])
+            return None
+        content = r.json()["choices"][0]["message"]["content"]
+        return _parse_json(content)
+    except Exception as e:
+        logger.warning("Relay failed: %s", e)
+        return None
+
+
 def llm_extract(raw_text: str) -> tuple[Optional[dict], str]:
     """Try each LLM provider in priority order.
 
     Returns: (parsed_dict, provider_name) or (None, "none")
     """
     for provider_fn, name in [
+        (call_relay, "relay"),
         (call_ollama, "ollama"),
         (call_openrouter, "openrouter"),
         (call_anthropic, "anthropic"),

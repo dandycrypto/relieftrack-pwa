@@ -29,7 +29,26 @@ def get_engine():
     global _engine
     if _engine is None:
         from rapidocr import RapidOCR
-        _engine = RapidOCR()
+        from rapidocr.utils.typings import LangRec, OCRVersion
+
+        # Use the English PP-OCRv5 recognition model, not the default.
+        #
+        # RapidOCR's default config is LangRec.CH + PP-OCRv4, a Chinese/English
+        # model. On Latin text it silently discards inter-word spaces, turning
+        # "POPULAR BOOKSTORE SDN BHD" into "POPULARBOOKSTORESDNBHD" at 0.998
+        # confidence. Every downstream field built from multi-word text then
+        # degrades: vendor names collapse, address lines join, and date/amount
+        # regexes miss because the surrounding tokens are glued together.
+        #
+        # PP-OCRv5 with lang_type EN is trained on Latin script and preserves
+        # word boundaries. Detection and classification models stay as they are;
+        # only recognition changes.
+        _engine = RapidOCR(
+            params={
+                "Rec.lang_type": LangRec.EN,
+                "Rec.ocr_version": OCRVersion.PPOCRV5,
+            }
+        )
     return _engine
 
 

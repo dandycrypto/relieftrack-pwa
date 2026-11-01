@@ -393,10 +393,38 @@ def detect_document_type(text: str, lines: list) -> str:
             return "invoice"
     if "RECEIPT" in upper or "RINGKASAN BIL" in upper or "RESIT" in upper:
         return "receipt"
-    # Default to receipt if amount-like total line exists
-    for ln in lines:
-        if any(s in ln["text"].lower() for s in TOTAL_SYNONYMS_LOWER[:5]):
-            return "receipt"
+
+    # No explicit document-type word. Fall back to structural evidence rather
+    # than giving up: Malaysian retail receipts very often print no "RECEIPT"
+    # header at all, yet still show a TOTAL line, a payment line and a tax
+    # registration number. Returning "unknown" for those left the UI unable to
+    # pick a layout and pushed every field into manual review.
+    lower_lines = [ln["text"].lower() for ln in lines if ln.get("text")]
+
+    has_total = any(
+        any(s in ln for s in TOTAL_SYNONYMS_LOWER) for ln in lower_lines
+    )
+    has_payment = any(
+        any(tok in ln for tok in ("cash", "change", "tunai", "baki", "card", "visa", "mastercard"))
+        for ln in lower_lines
+    )
+    has_tax_reg = bool(
+        re.search(r'\bgst\b|\bsst\b|\btin\b', text, re.I)
+    )
+    has_line_items = sum(
+        1 for ln in lower_lines
+        if re.search(r'\d+[.,]\d{2}\s*$', ln)
+    ) >= 2
+
+    # A total plus any corroborating signal is a receipt in practice.
+    if has_total and (has_payment or has_tax_reg or has_line_items):
+        return "receipt"
+
+    # Structured document with an amount but no payment evidence is more likely
+    # an invoice or bill than an unclassifiable blob.
+    if has_total and has_line_items:
+        return "invoice"
+
     return "unknown"
 
 
