@@ -131,6 +131,15 @@ export async function GET(request: NextRequest) {
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
+      // Must match utils/supabase/client.ts. The browser stores its PKCE code
+      // verifier with SameSite=None so it survives the cross-site return from
+      // accounts.google.com; the session cookies written here must use the same
+      // attributes so later navigations keep sending them.
+      cookieOptions: {
+        sameSite: 'none',
+        secure: true,
+        path: '/',
+      },
       cookies: {
         get: (name: string) => request.cookies.get(name)?.value,
         set: (name: string, value: string, options: CookieOptions) => {
@@ -144,7 +153,27 @@ export async function GET(request: NextRequest) {
   )
 
   const { error } = await supabase.auth.exchangeCodeForSession(code)
-  if (error) return NextResponse.redirect(`${siteUrl}/login?error=auth_failed`)
+  if (error) {
+    // Log the real reason. Without this the callback fails opaquely: the user
+    // sees a redirect to /login?error=auth_failed with no server-side trace,
+    // which makes a PKCE/verifier mismatch indistinguishable from an expired
+    // code or a bad redirect URI.
+    console.error('[Auth Callback] exchangeCodeForSession failed:', {
+      message: error.message,
+      status: error.status,
+      code: (error as { code?: string }).code,
+      // Whether the PKCE verifier cookie arrived with this request is the
+      // single most useful signal here: if it is absent, the client that
+      // started the flow stored its verifier somewhere the server cannot see
+      // (for example localStorage instead of cookies), so the exchange can
+      // never succeed.
+      hasPkceVerifier: request.cookies
+        .getAll()
+        .some((c) => c.name.includes('code-verifier') || c.name.includes('auth-token')),
+      incomingCookies: request.cookies.getAll().map((c) => c.name),
+    })
+    return NextResponse.redirect(`${siteUrl}/login?error=auth_failed`)
+  }
 
   // Determine redirect based on whether this is a Drive connect OAuth
   let redirectPath = '/dashboard'

@@ -27,6 +27,14 @@ export async function middleware(request: NextRequest) {
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
+      // Match the browser client's cookie attributes (see
+      // utils/supabase/client.ts) so refreshed session cookies carry
+      // SameSite=None and keep working after the cross-site OAuth return.
+      cookieOptions: {
+        sameSite: 'none',
+        secure: true,
+        path: '/',
+      },
       cookies: {
         get(name: string) {
           return request.cookies.get(name)?.value
