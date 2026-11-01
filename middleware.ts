@@ -10,7 +10,12 @@ import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
 export async function middleware(request: NextRequest) {
-  // Create response to modify
+  // A single response instance is created once and reused below. Previously
+  // this handler built a brand-new NextResponse inside every cookie mutation,
+  // which discarded any cookies already set on the earlier response object.
+  // Supabase writes several cookies when it refreshes a session (access token,
+  // refresh token, chunked variants), so rebuilding the response silently
+  // dropped all but the last — causing intermittent "logged out" states.
   let response = NextResponse.next({
     request: {
       headers: request.headers,
@@ -27,19 +32,13 @@ export async function middleware(request: NextRequest) {
           return request.cookies.get(name)?.value
         },
         set(name: string, value: string, options: CookieOptions) {
-          // Set cookie on request for access in server components
+          // Keep the request view in sync so downstream server components see it
           request.cookies.set({ name, value, ...options })
-          // Set cookie on response for browser
-          response = NextResponse.next({
-            request: { headers: request.headers },
-          })
+          // Set on the SAME response so previously-set cookies survive
           response.cookies.set({ name, value, ...options })
         },
         remove(name: string, options: CookieOptions) {
           request.cookies.set({ name, value: '', ...options })
-          response = NextResponse.next({
-            request: { headers: request.headers },
-          })
           response.cookies.set({ name, value: '', ...options })
         },
       },
@@ -47,7 +46,32 @@ export async function middleware(request: NextRequest) {
   )
 
   // Refresh session if expired — this also updates the auth cookies
-  await supabase.auth.getUser()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  // ── Auth gate ─────────────────────────────────────────────────────────────
+  // Routes that require a signed-in user. Demo mode (?demo=true) is a
+  // deliberate, non-persisted showcase and stays reachable without an account.
+  const path = request.nextUrl.pathname
+  const isDemo = request.nextUrl.searchParams.get('demo') === 'true'
+  const isProtected = path === '/dashboard' || path === '/profile'
+
+  if (isProtected && !user && !isDemo) {
+    const url = request.nextUrl.clone()
+    url.pathname = '/login'
+    url.search = ''
+    // Preserve where the user was heading so they can be returned post-login.
+    if (path !== '/dashboard') url.searchParams.set('next', path)
+
+    // Build the redirect on top of `response` so any cookies Supabase just
+    // refreshed during getUser() are carried over rather than dropped.
+    const redirect = NextResponse.redirect(url)
+    response.cookies.getAll().forEach((cookie) => {
+      redirect.cookies.set(cookie)
+    })
+    return redirect
+  }
 
   return response
 }
