@@ -10,11 +10,13 @@ import {
   extractInvoiceNumber,
   suggestCategory,
   extractTaxAmount,
+  extractLineItems,
   KWSP_MEMBER_PATTERNS,
   TIN_PATTERNS,
   EA_FORM_NUMBER_PATTERNS,
   extractFirstMatch,
 } from '@/lib/ocr-parsers'
+import { extractReceiptFields } from '@/lib/ocr-llm-extract'
 
 // OCR is compute-heavy (RapidOCR / pdftotext); cap requests per user.
 const RATE_LIMIT_MAX = 20
@@ -573,50 +575,70 @@ export async function POST(request: NextRequest) {
     }
 
     // ── Non-EA-form result ─────────────────────────────────────────────────
+    // Regex/keyword field extraction (lib/ocr-parsers.ts) is brittle and
+    // frequently mis-tags receipts (substring keyword matching, category
+    // ids that aren't even valid relief categories). We run an LLM pass on
+    // the raw text to get real field extraction + LHDN-aware categorisation,
+    // and only fall back to the regex fields it couldn't fill in or if the
+    // LLM call itself is unavailable (no API key, network error, etc.) —
+    // see lib/ocr-llm-extract.ts.
+    const llm = rawText.length > 20 ? await extractReceiptFields(rawText) : null
+
     if (serviceResult) {
       // Came from the OCR microservice — it already extracted structured
       // fields (works for receipt/invoice photos and scanned PDFs alike).
       return NextResponse.json({
-        vendor: serviceResult.vendor,
-        date: serviceResult.date,
+        vendor: llm?.merchant || serviceResult.vendor,
+        date: llm?.date || serviceResult.date,
         time: serviceResult.time,
-        amount: serviceResult.amount,
+        amount: llm?.amount ?? serviceResult.amount,
         tax_amount: serviceResult.tax_amount,
         tax_type: serviceResult.tax_type,
-        currency: serviceResult.currency || 'MYR',
-        category: serviceResult.category,
-        invoice_number: serviceResult.invoice_number,
+        currency: llm?.currency || serviceResult.currency || 'MYR',
+        category: llm?.category || serviceResult.category,
+        invoice_number: llm?.invoice_number || serviceResult.invoice_number,
         tin: serviceResult.tin,
         sst_registration_no: serviceResult.sst_registration_no,
         raw_text: rawText,
-        confidence: serviceResult.confidence,
+        confidence: llm ? llm.confidence : serviceResult.confidence,
         extraction_method: serviceResult.extraction_method,
         needs_review: serviceResult.needs_review,
         document_type: serviceResult.document_type,
         eaFormData: null,
+        description: llm?.description || null,
+        sub_category: llm?.category ? llm.sub_category : null,
+        claimable: llm?.claimable,
       })
     }
 
-    // Came from pdftotext — run the shared receipt parsers on the clean
-    // digital text layer (no OCR uncertainty, so confidence is high).
+    // Came from pdftotext. Regex parsers run on the clean digital text
+    // layer as the baseline/fallback; the LLM extraction above supplies
+    // the real merchant/category/subcategory/description when available.
+    const regexDate = parseDate(rawText)
     return NextResponse.json({
-      vendor: extractVendor(rawText),
-      date: parseDate(rawText).date,
-      time: parseDate(rawText).time,
-      amount: extractAmount(rawText),
+      vendor: llm?.merchant || extractVendor(rawText),
+      date: llm?.date || regexDate.date,
+      time: regexDate.time,
+      amount: llm?.amount ?? extractAmount(rawText),
       tax_amount: extractTaxAmount(rawText),
       tax_type: null,
-      currency: detectCurrency(rawText),
-      category: suggestCategory(rawText),
-      invoice_number: extractInvoiceNumber(rawText),
+      currency: llm?.currency || detectCurrency(rawText),
+      category: llm?.category || suggestCategory(rawText),
+      invoice_number: llm?.invoice_number || extractInvoiceNumber(rawText),
       tin: null,
       sst_registration_no: null,
       raw_text: rawText,
-      confidence: 1.0,
+      // pdftotext has no OCR uncertainty, but field extraction can still be
+      // wrong — confidence now reflects the LLM's grounded self-assessment
+      // (see lib/ocr-llm-extract.ts) rather than always claiming certainty.
+      confidence: llm ? llm.confidence : 1.0,
       extraction_method: 'pdftotext',
       needs_review: false,
       document_type: 'unknown',
       eaFormData: null,
+      description: llm?.description || extractLineItems(rawText),
+      sub_category: llm?.category ? llm.sub_category : null,
+      claimable: llm?.claimable,
     })
   } catch (err) {
     console.error('[OCR] Route error:', err instanceof Error ? err.message : err)
