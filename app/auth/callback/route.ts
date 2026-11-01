@@ -141,12 +141,18 @@ export async function GET(request: NextRequest) {
         path: '/',
       },
       cookies: {
-        get: (name: string) => request.cookies.get(name)?.value,
-        set: (name: string, value: string, options: CookieOptions) => {
-          cookiesToSet.push({ name, value, options })
-        },
-        remove: (name: string, options: CookieOptions) => {
-          cookiesToSet.push({ name, value: '', options })
+        // getAll/setAll, not the deprecated get/set/remove trio.
+        //
+        // @supabase/ssr 0.10.x warns that the get/set/remove adapter "can lead
+        // to issues such as random logouts, early session termination", and
+        // that is exactly what broke PKCE here: the storage layer needs to
+        // enumerate the cookies it already holds (to reuse or clear them), and
+        // the deprecated `get` path reconstructs that set from guessed chunk
+        // names instead of the real request. The code verifier was visible in
+        // incomingCookies yet still reported as "not found in storage".
+        getAll: () => request.cookies.getAll().map(({ name, value }) => ({ name, value })),
+        setAll: (toSet: { name: string; value: string; options: CookieOptions }[]) => {
+          for (const cookie of toSet) cookiesToSet.push(cookie)
         },
       },
     }

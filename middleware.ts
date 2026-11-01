@@ -36,18 +36,21 @@ export async function middleware(request: NextRequest) {
         path: '/',
       },
       cookies: {
-        get(name: string) {
-          return request.cookies.get(name)?.value
+        // getAll/setAll rather than the deprecated get/set/remove trio.
+        // @supabase/ssr 0.10.x warns that the old adapter causes "random
+        // logouts and early session termination" because it cannot see the full
+        // cookie set, so it re-derives names by guessing chunk suffixes. Passing
+        // the real request cookies through fixes session refresh and PKCE.
+        getAll() {
+          return request.cookies.getAll()
         },
-        set(name: string, value: string, options: CookieOptions) {
-          // Keep the request view in sync so downstream server components see it
-          request.cookies.set({ name, value, ...options })
-          // Set on the SAME response so previously-set cookies survive
-          response.cookies.set({ name, value, ...options })
-        },
-        remove(name: string, options: CookieOptions) {
-          request.cookies.set({ name, value: '', ...options })
-          response.cookies.set({ name, value: '', ...options })
+        setAll(cookiesToSet: { name: string; value: string; options: CookieOptions }[]) {
+          for (const { name, value, options } of cookiesToSet) {
+            // Keep the request view in sync so downstream server components see it
+            request.cookies.set({ name, value, ...options })
+            // Set on the SAME response so previously-set cookies survive
+            response.cookies.set({ name, value, ...options })
+          }
         },
       },
     }
