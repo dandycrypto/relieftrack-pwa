@@ -5,7 +5,7 @@
  */
 
 import { createServerClient, type CookieOptions } from '@supabase/ssr'
-import { NextResponse, type NextRequest } from 'next/server'
+import { NextResponse, type NextRequest, after } from 'next/server'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -26,6 +26,19 @@ const CATEGORY_FOLDER_NAMES: Record<string, string> = {
   lifestyle:            '10_Lifestyle',
   epf_insurance:        '11_EPF_Insurance_Takaful',
   housing_loan:         '12_First_Home_Loan_Interest',
+}
+
+/**
+ * Per-request timeout for Google API calls.
+ *
+ * Drive provisioning happens in the background after the OAuth redirect, but a
+ * single hung socket would otherwise stall the whole chain indefinitely and
+ * leak the request. 15s per call is generous for Drive metadata operations.
+ */
+const DRIVE_TIMEOUT_MS = 15_000
+
+function driveSignal(): AbortSignal {
+  return AbortSignal.timeout(DRIVE_TIMEOUT_MS)
 }
 
 function authHeaders(token: string) {
@@ -58,6 +71,7 @@ async function createMultipart(token: string, folderId: string, manifest: object
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` },
     body: flat,
+    signal: driveSignal(),
   })
   if (!res.ok) {
     const body = await res.text()
@@ -70,13 +84,14 @@ async function findOrCreateFolder(token: string, name: string, parents: string[]
   if (parents.length > 0) query = `"${parents[0]}" in parents and ` + query
   const search = await fetch(
     `${DRIVE_API}/files?q=${encodeURIComponent(query)}&fields=files(id,name)`,
-    { headers: authHeaders(token) }
+    { headers: authHeaders(token), signal: driveSignal() }
   ).then(ensureOk)
   if (search.files?.length) return search.files[0]
   const created = await fetch(`${DRIVE_API}/files?fields=id,name,mimeType`, {
     method: 'POST',
     headers: authHeaders(token),
     body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder', parents: parents.length ? parents : undefined }),
+    signal: driveSignal(),
   }).then(ensureOk)
   return created
 }
@@ -85,15 +100,15 @@ async function setupDriveFolders(token: string, taxYear: number): Promise<void> 
   const root = await findOrCreateFolder(token, 'ReliefTrack MY')
   const ya = await findOrCreateFolder(token, `YA ${taxYear}`, [root.id])
   // Root manifest
-  const rootMan = await fetch(`${DRIVE_API}/files?q=${encodeURIComponent(`"${root.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`, { headers: authHeaders(token) }).then(ensureOk)
+  const rootMan = await fetch(`${DRIVE_API}/files?q=${encodeURIComponent(`"${root.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`, { headers: authHeaders(token), signal: driveSignal() }).then(ensureOk)
   if (!rootMan.files?.length) await createMultipart(token, root.id, { version: '1.0', updatedAt: new Date().toISOString() })
   // YA manifest
-  const yaMan = await fetch(`${DRIVE_API}/files?q=${encodeURIComponent(`"${ya.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`, { headers: authHeaders(token) }).then(ensureOk)
+  const yaMan = await fetch(`${DRIVE_API}/files?q=${encodeURIComponent(`"${ya.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`, { headers: authHeaders(token), signal: driveSignal() }).then(ensureOk)
   if (!yaMan.files?.length) await createMultipart(token, ya.id, { version: '1.0', updatedAt: new Date().toISOString(), year: taxYear })
   // Category folders + manifests
   for (const folderName of Object.values(CATEGORY_FOLDER_NAMES)) {
     const catFolder = await findOrCreateFolder(token, folderName, [ya.id])
-    const manSearch = await fetch(`${DRIVE_API}/files?q=${encodeURIComponent(`"${catFolder.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`, { headers: authHeaders(token) }).then(ensureOk)
+    const manSearch = await fetch(`${DRIVE_API}/files?q=${encodeURIComponent(`"${catFolder.id}" in parents and name="manifest.json" and trashed=false`)}&fields=files(id,name)`, { headers: authHeaders(token), signal: driveSignal() }).then(ensureOk)
     if (!manSearch.files?.length) await createMultipart(token, catFolder.id, { version: '1.0', updatedAt: new Date().toISOString(), records: [] })
   }
 }
@@ -134,17 +149,31 @@ export async function GET(request: NextRequest) {
   // Determine redirect based on whether this is a Drive connect OAuth
   let redirectPath = '/dashboard'
   let setupResult = '0'
+
   if (driveConnect) {
     redirectPath = '/dashboard?tab=settings'
     const { data: { session } } = await supabase.auth.getSession()
     const googleToken = session?.provider_token || null
+
     if (googleToken) {
-      try {
-        await setupDriveFolders(googleToken, new Date().getFullYear())
-        setupResult = '1'
-      } catch (err) {
-        console.error('[Auth Callback] Drive folder setup failed:', err)
-      }
+      // Drive folder provisioning walks 12 category folders and issues up to
+      // ~56 sequential Google API calls (search/create folder + manifest,
+      // twice per folder). Awaiting that here meant the OAuth redirect could
+      // block for tens of seconds; any slow Google response pushed the origin
+      // past Cloudflare's tolerance and surfaced as a 520 "unknown error" on
+      // the login page.
+      //
+      // The session is already established at this point, so the redirect does
+      // not need to wait. `after()` schedules the work to run once the response
+      // has been sent, so the user is redirected immediately and provisioning
+      // continues server-side. The dashboard already handles the "folders not
+      // ready yet" case via ?drive_setup=0.
+      after(
+        setupDriveFolders(googleToken, new Date().getFullYear()).catch((err) => {
+          console.error('[Auth Callback] Drive folder setup failed (background):', err)
+        })
+      )
+      setupResult = '1'
     } else {
       console.warn('[Auth Callback] No provider_token in session — cannot create Drive folders')
     }
