@@ -21,6 +21,8 @@ import re
 import time
 from typing import Optional
 
+from . import llm_budget
+
 logger = logging.getLogger("relieftrack-ocr")
 
 
@@ -183,6 +185,14 @@ def call_relay(raw_text: str, model: str = None):
     key = os.environ.get("LLM_API_KEY")
     if not base or not key:
         return None
+    # The relay key is shared with protocol90-meals and has no server-side
+    # per-consumer accounting, so ReliefTrack must bound its own spend or it
+    # silently eats that service's daily allowance.
+    if not llm_budget.allowed():
+        logger.warning(
+            "LLM daily cap reached (%s), skipping relay fallback", llm_budget.stats()
+        )
+        return None
     model = model or os.environ.get("LLM_MODEL", "deepseek-v4.1-flash")
     try:
         import requests
@@ -203,6 +213,7 @@ def call_relay(raw_text: str, model: str = None):
             timeout=25,
         )
         elapsed = time.time() - t0
+        llm_budget.consume()
         logger.info("Relay %s: %s in %.2fs", model, r.status_code, elapsed)
         if not r.ok:
             logger.warning("Relay failed body: %s", r.text[:200])

@@ -33,6 +33,53 @@ export class LLMError extends Error {}
 /** Backwards-compatible alias so older imports keep type-checking. */
 export { LLMError as MiniMaxError }
 
+/**
+ * Daily call budget for the shared relay.
+ *
+ * The relay key is shared with protocol90-meals. That service caps itself at
+ * 40/day internally, but the relay has no per-consumer accounting and exposes
+ * no balance endpoint, so ReliefTrack's calls spend the same upstream balance
+ * while being invisible to that cap. Without a budget here, a busy ReliefTrack
+ * silently starves protocol90 of its allowance.
+ *
+ * Process-local, like protocol90's own counter. If this app is ever run with
+ * more than one worker, this must move to a shared store.
+ */
+const DAILY_CAP = (() => {
+  const raw = process.env.LLM_DAILY_CAP
+  if (raw === undefined || raw === '') return 200
+  const n = Number.parseInt(raw, 10)
+  return Number.isFinite(n) ? n : 200
+})()
+
+let budgetDay = ''
+let budgetUsed = 0
+
+function today(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function budgetRemaining(): number {
+  if (DAILY_CAP <= 0) return Number.MAX_SAFE_INTEGER
+  if (budgetDay !== today()) {
+    budgetDay = today()
+    budgetUsed = 0
+  }
+  return Math.max(0, DAILY_CAP - budgetUsed)
+}
+
+function consumeBudget(): void {
+  if (budgetDay !== today()) {
+    budgetDay = today()
+    budgetUsed = 0
+  }
+  budgetUsed += 1
+}
+
+export function llmBudgetStats(): { cap: number; used: number; remaining: number } {
+  return { cap: DAILY_CAP, used: budgetUsed, remaining: budgetRemaining() }
+}
+
 interface Provider {
   name: string
   baseUrl: string
@@ -78,6 +125,13 @@ export async function callLLM(
 ): Promise<string> {
   const provider = resolveProvider()
 
+  if (budgetRemaining() <= 0) {
+    throw new LLMError(
+      `Daily LLM budget exhausted (${DAILY_CAP} calls). This cap protects the ` +
+        `shared relay balance used by protocol90-meals; it resets at midnight UTC.`
+    )
+  }
+
   const candidates = Array.from(
     new Set(
       [
@@ -113,6 +167,7 @@ export async function callLLM(
         signal: AbortSignal.timeout(25_000),
       })
 
+      consumeBudget()
       if (res.ok) {
         const data = await res.json()
         const reply = data?.choices?.[0]?.message?.content
