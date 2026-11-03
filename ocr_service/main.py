@@ -31,6 +31,7 @@ from .preprocessor import load_image_bytes, preprocess_image
 from .ocr_engine import run_ocr, tag_zones
 from .extractor import extract_all
 from .confidence import confidence_score, needs_review, confidence_band
+from .field_validation import validate_fields
 from .ea_template import is_ea_form, extract_ea_form
 from .pdf_handler import process_pdf
 from .llm_extractor import llm_extract
@@ -118,6 +119,11 @@ async def ocr_endpoint(file: UploadFile = File(...)):
         a_result["raw_text"] = text
 
         # ── Step 6: Compute confidence
+        # Validate field plausibility before scoring. Confidence alone measures
+        # presence, so a misread serial ("INV-202S-00842") would otherwise score
+        # 1.0 and be reported as needing no review.
+        field_issues = validate_fields(a_result)
+
         conf = confidence_score(
             amount=a_result["amount"],
             vendor=a_result["vendor"],
@@ -125,6 +131,7 @@ async def ocr_endpoint(file: UploadFile = File(...)):
             doc_type=a_result["document_type"],
             math_check_passed=a_result["math_check_passed"],
             used_llm=False,
+            field_issues=field_issues,
         )
 
         # ── Step 7: Strategy B (LLM fallback if confidence low)
@@ -141,6 +148,9 @@ async def ocr_endpoint(file: UploadFile = File(...)):
                             "sst_registration_no"]:
                     if a_result.get(key) is None and llm_data.get(key) is not None:
                         a_result[key] = llm_data[key]
+                # Re-validate after merging: the LLM may have filled a field
+                # that then fails plausibility, or fixed one that did.
+                field_issues = validate_fields(a_result)
                 # Recompute confidence with LLM penalty
                 conf = confidence_score(
                     amount=a_result["amount"],
@@ -149,6 +159,7 @@ async def ocr_endpoint(file: UploadFile = File(...)):
                     doc_type=a_result["document_type"],
                     math_check_passed=a_result["math_check_passed"],
                     used_llm=True,
+                    field_issues=field_issues,
                 )
 
         # ── Step 8: Finalize response
@@ -157,8 +168,12 @@ async def ocr_endpoint(file: UploadFile = File(...)):
         a_result["needs_review"] = needs_review(
             conf, a_result["amount"], a_result["math_check_passed"],
             used_llm=used_llm,
+            field_issues=field_issues,
         )
         a_result["confidence_band"] = confidence_band(conf)
+        # Surface *why* a document needs review. A bare low score tells the user
+        # nothing actionable; naming the suspect field lets the UI point at it.
+        a_result["validation_issues"] = field_issues
         a_result["elapsed_ms"] = int((time.time() - t0) * 1000)
 
         return JSONResponse(_add_legacy_aliases(a_result))

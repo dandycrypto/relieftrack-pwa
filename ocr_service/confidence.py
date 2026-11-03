@@ -33,9 +33,15 @@ THRESHOLD_AMBER = 0.70
 # LLM penalty
 LLM_PENALTY = 0.85
 
+# Plausibility penalty per affected field. 0.20 is enough that a single
+# suspicious field takes a perfect 1.0 down to 0.80 (amber), below the green
+# threshold, so a wrong-but-present value can never be reported as confident.
+ISSUE_PENALTY = 0.20
+
 
 def confidence_score(amount, vendor, date, doc_type: str,
-                    math_check_passed: bool, used_llm: bool = False) -> float:
+                    math_check_passed: bool, used_llm: bool = False,
+                    field_issues=None) -> float:
     """Compute weighted confidence score.
 
     Args:
@@ -45,6 +51,12 @@ def confidence_score(amount, vendor, date, doc_type: str,
         doc_type: receipt/invoice/ea_form/unknown
         math_check_passed: True if subtotal+tax ≈ total (or not verifiable)
         used_llm: True if LLM Strategy B was used (penalty applies)
+        field_issues: plausibility problems from field_validation
+
+    IMPORTANT: this score measures *presence*, not correctness. A field can be
+    present and still be a recognition error (e.g. "INV-202S-00842", where a 5
+    was read as S). field_issues catches those, so the penalty below is applied
+    per distinct affected field.
     """
     score = 0.0
 
@@ -68,6 +80,14 @@ def confidence_score(amount, vendor, date, doc_type: str,
     if doc_type and doc_type != "unknown":
         score += WEIGHT_DOC_TYPE
 
+    # Plausibility penalty: each affected field costs a fixed share, so one
+    # suspicious field drops a perfect score out of the green band.
+    if field_issues:
+        affected = {issue.split(":", 1)[0].strip() for issue in field_issues}
+        score -= min(0.30, ISSUE_PENALTY * len(affected))
+
+    score = max(0.0, score)
+
     # LLM penalty
     if used_llm:
         score *= LLM_PENALTY
@@ -76,15 +96,18 @@ def confidence_score(amount, vendor, date, doc_type: str,
 
 
 def needs_review(confidence: float, amount, math_check_passed: bool,
-                 used_llm: bool = False) -> bool:
+                 used_llm: bool = False, field_issues=None) -> bool:
     """Determine if extraction needs human review.
 
     Returns True if:
+      - any field failed plausibility checks
       - confidence < THRESHOLD_AMBER
       - amount is None (critical field missing)
       - math_check_failed
       - LLM was used (always review LLM output)
     """
+    if field_issues:
+        return True
     if used_llm:
         return True
     if amount is None:
