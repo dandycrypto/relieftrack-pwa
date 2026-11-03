@@ -1611,6 +1611,8 @@ useEffect(() => {
     category: string
     subCategory?: string
     claimable?: boolean
+    /** Plausibility problems from the OCR service; shown in the review screen. */
+    validationIssues?: string[]
   } | null>(null)
   const [ocrResult, setOcrResult] = useState<OcrResult | null>(null)
   const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null)
@@ -1799,6 +1801,7 @@ useEffect(() => {
         category,
         subCategory,
         claimable: result.claimable,
+        validationIssues: (result as { validation_issues?: string[] }).validation_issues ?? [],
       }
       // High-confidence auto-save: skip review screen only when confidence is
       // genuinely high, required fields are present, the LLM classifier (if
@@ -1807,6 +1810,16 @@ useEffect(() => {
       // failing routes to the review screen instead of silently mis-filing
       // the record (e.g. a non-deductible purchase auto-saved as "verified").
       const autoSaveEligible =
+        // Checked first and explicitly: the OCR service sets needs_review and
+        // validation_issues when a field is present but implausible (e.g. an
+        // invoice number read as "INV-202S-00842"). Those documents can still
+        // clear the 0.85 threshold when the other fields score well, and
+        // auto-saving one would file a known-suspect value as "verified"
+        // without a human ever seeing it.
+        !(
+          (result as { needs_review?: boolean }).needs_review === true ||
+          ((result as { validation_issues?: string[] }).validation_issues?.length ?? 0) > 0
+        ) &&
         result.confidence >= 0.85 &&
         reviewPayload.vendor &&
         reviewPayload.amount &&
@@ -4304,6 +4317,20 @@ useEffect(() => {
                   {Math.round(reviewData.confidence * 100)}% confidence
                 </span>
               </div>
+
+              {/* Why this document needs a human look. The OCR service names the
+                  suspect field (e.g. a serial read as "INV-202S-00842"), so the
+                  user can fix that one value instead of re-reading everything. */}
+              {((reviewData.validationIssues?.length) ?? 0) > 0 && (
+                <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+                  <p className="font-medium">Check before saving</p>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                    {reviewData.validationIssues!.map((issue, i) => (
+                      <li key={i}>{issue}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               {/* Subcategory (categories with sub-items need one for the sub-cap to be enforced) */}
               {RELIEF_CATEGORIES.find(c => c.id === reviewData.category)?.subcategories && RELIEF_CATEGORIES.find(c => c.id === reviewData.category)!.subcategories!.length > 0 && (

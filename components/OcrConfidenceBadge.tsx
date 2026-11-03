@@ -5,10 +5,24 @@ import { mapConfidenceToLevel, type OcrConfidenceLevel } from '@/types/ocr'
 interface OcrConfidenceBadgeProps {
   confidence: number
   needsReview?: boolean
+  /**
+   * Plausibility problems reported by the OCR service, e.g.
+   * "invoice_number: '202S' mixes digits with letter(s) S".
+   *
+   * Rendered as a tooltip rather than inline text: the badge is small, but a
+   * user who sees "Review needed" needs to know WHICH field to check, otherwise
+   * the flag is only actionable by re-reading the whole document.
+   */
+  validationIssues?: string[]
   className?: string
 }
 
-export function OcrConfidenceBadge({ confidence, needsReview, className }: OcrConfidenceBadgeProps) {
+export function OcrConfidenceBadge({
+  confidence,
+  needsReview,
+  validationIssues,
+  className,
+}: OcrConfidenceBadgeProps) {
   const level = mapConfidenceToLevel(confidence)
 
   // Override to "review" if needs_review flag is set (even if score is green)
@@ -34,10 +48,20 @@ export function OcrConfidenceBadge({ confidence, needsReview, className }: OcrCo
     },
   }[display]
 
+  const issues = validationIssues?.filter(Boolean) ?? []
+  const title = issues.length
+    ? `Check these fields:\n${issues.map((i) => `• ${i}`).join('\n')}`
+    : undefined
+
   return (
     <span
       role="status"
-      aria-label={`Extraction confidence: ${config.label}`}
+      title={title}
+      aria-label={
+        title
+          ? `Extraction confidence: ${config.label}. ${issues.join('. ')}`
+          : `Extraction confidence: ${config.label}`
+      }
       className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${config.bg} ${config.text} ${className ?? ''}`}
     >
       {/* Dot indicator */}

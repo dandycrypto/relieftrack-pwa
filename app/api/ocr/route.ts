@@ -85,6 +85,9 @@ interface OcrServiceResult {
   needs_review: boolean
   document_type: string | null
   confidence_band?: string
+  /** Human-readable plausibility problems from the OCR service, e.g.
+   *  "invoice_number: '202S' mixes digits with letter(s) S". Empty when clean. */
+  validation_issues?: string[]
   elapsed_ms?: number
 }
 
@@ -603,6 +606,7 @@ export async function POST(request: NextRequest) {
         confidence: llm ? llm.confidence : serviceResult.confidence,
         extraction_method: serviceResult.extraction_method,
         needs_review: serviceResult.needs_review,
+        validation_issues: serviceResult.validation_issues ?? [],
         document_type: serviceResult.document_type,
         eaFormData: null,
         description: llm?.description || null,
